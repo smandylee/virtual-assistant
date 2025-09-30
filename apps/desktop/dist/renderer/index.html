@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8" />
+<title>Assistant</title>
+<style>
+  body{margin:0;font-family:sans-serif;background:#0b0e13;color:#e9eef6}
+  #app{display:flex;flex-direction:column;height:100vh}
+  header{padding:10px 16px;background:#121723;border-bottom:1px solid #222}
+  main{flex:1;overflow:auto;padding:16px}
+  .msg{max-width:720px;margin:8px 0;line-height:1.5}
+  .me{color:#a3d3ff}.ai{color:#e9eef6}
+  footer{display:flex;gap:8px;padding:12px;background:#121723;border-top:1px solid #222}
+  input{flex:1;padding:10px;border-radius:8px;border:1px solid #333;background:#0f141b;color:#e9eef6}
+  button{padding:10px 14px;border-radius:8px;border:0;background:#3b82f6;color:white}
+</style>
+</head>
+<body>
+<div id="app">
+  <header><strong>Assistant</strong></header>
+  <main id="log"></main>
+  <footer>
+    <input id="input" placeholder="메시지를 입력하세요" />
+    <button id="send">전송</button>
+  </footer>
+</div>
+<script type="module">
+// API URL을 하드코딩하여 테스트
+const API = "http://localhost:3030";
+const log = document.getElementById("log");
+const input = document.getElementById("input");
+const send = document.getElementById("send");
+
+console.log("API URL:", API);
+console.log("window.env:", window.env);
+
+function add(role, text){
+  const div = document.createElement("div");
+  div.className = "msg " + (role==="user"?"me":"ai");
+  div.textContent = (role==="user"?"> ":"") + text;
+  log.appendChild(div); log.scrollTop = log.scrollHeight;
+}
+
+send.onclick = async ()=>{
+  const message = input.value.trim(); 
+  if(!message) return;
+  
+  console.log("Sending message:", message);
+  add("user", message); 
+  input.value="";
+  
+  try {
+    const r = await fetch(API+"/chat",{
+      method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({message})
+    });
+    const j = await r.json();
+    console.log("Response:", j);
+    add("assistant", j.reply || j.error || "(no reply)");
+  } catch (error) {
+    console.error("Error:", error);
+    add("assistant", "Error: " + error.message);
+  }
+};
+
+input.addEventListener("keydown",(e)=>{ if(e.key==="Enter") send.click(); });
+</script>
+</body>
+</html>
