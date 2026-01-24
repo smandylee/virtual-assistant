@@ -5,10 +5,12 @@
   "description": "Electron + LLM Assistant",
   "main": "apps/desktop/dist/main/index.js",
   "scripts": {
-    "build:core": "tsc -p tsconfig.json --outDir core/dist",
-    "build:desktop": "tsc -p tsconfig.json --outDir apps/desktop/dist",
+    "build:core": "tsc -p core/tsconfig.json",
+    "build:desktop": "tsc -p apps/desktop/tsconfig.json && xcopy apps\\desktop\\src\\renderer apps\\desktop\\dist\\renderer /E /I /Y",
     "dev:core": "tsx core/src/api/server.ts",
     "dev:desktop": "NODE_ENV=development electron .",
+    "dev:desktop:win": "set NODE_ENV=development && electron .",
+    "dev:win": "concurrently \"npm:dev:core\" \"npm:dev:desktop:win\"",
     "dev": "concurrently \"npm:dev:core\" \"npm:dev:desktop\""
   },
   "keywords": [],
@@ -24,7 +26,10 @@
     "typescript": "^5.9.2"
   },
   "dependencies": {
+    "@google/genai": "^1.35.0",
+    "@google/generative-ai": "^0.24.1",
     "@types/cors": "^2.8.19",
+    "@types/multer": "^2.0.0",
     "@types/node-fetch": "^2.6.13",
     "better-sqlite3": "^12.4.1",
     "boolean": "^3.2.0",
@@ -68,10 +73,12 @@
     "matcher": "^3.0.0",
     "mimic-response": "^1.0.1",
     "ms": "^2.1.3",
+    "multer": "^2.0.2",
     "node-fetch": "^3.3.2",
     "normalize-url": "^6.1.0",
     "object-keys": "^1.1.1",
     "once": "^1.4.0",
+    "openai": "^6.1.0",
     "p-cancelable": "^2.1.1",
     "pend": "^1.2.0",
     "progress": "^2.0.3",

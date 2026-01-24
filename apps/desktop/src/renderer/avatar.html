@@ -1,0 +1,654 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Alpha - 플로팅 아바타</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            background: transparent;
+            font-family: 'Segoe UI', 'Malgun Gothic', sans-serif;
+            overflow: hidden;
+            width: 100vw;
+            height: 100vh;
+            user-select: none;
+        }
+
+        /* 메인 컨테이너 */
+        .floating-avatar {
+            position: fixed;
+            bottom: 20px;
+            right: 20px;
+            display: flex;
+            flex-direction: column;
+            align-items: flex-end;
+            gap: 12px;
+            pointer-events: none;
+        }
+
+        /* 말풍선 */
+        .speech-bubble {
+            max-width: 350px;
+            min-width: 200px;
+            max-height: 300px;  /* 최대 높이 제한 */
+            overflow-y: auto;   /* 스크롤 가능 */
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 16px 20px;
+            border-radius: 20px 20px 4px 20px;
+            box-shadow: 0 8px 32px rgba(102, 126, 234, 0.4);
+            font-size: 14px;
+            line-height: 1.6;
+            opacity: 0;
+            transform: translateY(10px) scale(0.95);
+            transition: all 0.3s cubic-bezier(0.68, -0.55, 0.265, 1.55);
+            pointer-events: auto;
+            word-break: keep-all;
+        }
+
+        /* 말풍선 스크롤바 스타일 */
+        .speech-bubble::-webkit-scrollbar {
+            width: 6px;
+        }
+        .speech-bubble::-webkit-scrollbar-track {
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 3px;
+        }
+        .speech-bubble::-webkit-scrollbar-thumb {
+            background: rgba(255, 255, 255, 0.4);
+            border-radius: 3px;
+        }
+
+        .speech-bubble.show {
+            opacity: 1;
+            transform: translateY(0) scale(1);
+        }
+
+        .speech-bubble .message-text {
+            margin-bottom: 8px;
+        }
+
+        .speech-bubble .message-time {
+            font-size: 11px;
+            opacity: 0.7;
+            text-align: right;
+        }
+
+        /* 입력 영역 */
+        .input-area {
+            display: flex;
+            gap: 8px;
+            align-items: center;
+            background: rgba(255, 255, 255, 0.95);
+            backdrop-filter: blur(20px);
+            padding: 8px 12px;
+            border-radius: 28px;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.15);
+            opacity: 0;
+            transform: translateY(10px);
+            transition: all 0.3s ease;
+            pointer-events: auto;
+            border: 1px solid rgba(102, 126, 234, 0.2);
+        }
+
+        .input-area.show {
+            opacity: 1;
+            transform: translateY(0);
+        }
+
+        .input-area input {
+            flex: 1;
+            border: none;
+            outline: none;
+            background: transparent;
+            font-size: 14px;
+            color: #333;
+            min-width: 180px;
+            padding: 8px 4px;
+        }
+
+        .input-area input::placeholder {
+            color: #999;
+        }
+
+        .input-area button {
+            width: 36px;
+            height: 36px;
+            border-radius: 50%;
+            border: none;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: all 0.2s ease;
+        }
+
+        .send-btn {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+        }
+
+        .send-btn:hover {
+            transform: scale(1.1);
+            box-shadow: 0 4px 15px rgba(102, 126, 234, 0.4);
+        }
+
+        .mic-btn {
+            background: #f0f0f0;
+            color: #666;
+        }
+
+        .mic-btn:hover {
+            background: #e0e0e0;
+        }
+
+        .mic-btn.recording {
+            background: #ff4757;
+            color: white;
+            animation: pulse 1s infinite;
+        }
+
+        @keyframes pulse {
+            0%, 100% { transform: scale(1); }
+            50% { transform: scale(1.1); }
+        }
+
+        /* 아바타 */
+        .avatar-wrapper {
+            position: relative;
+            pointer-events: auto;
+            cursor: grab;
+        }
+
+        .avatar-wrapper:active {
+            cursor: grabbing;
+        }
+
+        .avatar {
+            width: 80px;
+            height: 80px;
+            border-radius: 50%;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            box-shadow: 0 8px 32px rgba(102, 126, 234, 0.4);
+            transition: all 0.3s ease;
+            overflow: hidden;
+            border: 3px solid white;
+        }
+
+        .avatar:hover {
+            transform: scale(1.05);
+            box-shadow: 0 12px 40px rgba(102, 126, 234, 0.5);
+        }
+
+        .avatar img {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+        }
+
+        .avatar-emoji {
+            font-size: 40px;
+        }
+
+        /* 상태 인디케이터 */
+        .status-dot {
+            position: absolute;
+            bottom: 2px;
+            right: 2px;
+            width: 16px;
+            height: 16px;
+            background: #2ed573;
+            border-radius: 50%;
+            border: 3px solid white;
+            box-shadow: 0 2px 8px rgba(46, 213, 115, 0.4);
+        }
+
+        .status-dot.thinking {
+            background: #ffa502;
+            animation: blink 1s infinite;
+        }
+
+        .status-dot.speaking {
+            background: #667eea;
+            animation: pulse 0.5s infinite;
+        }
+
+        @keyframes blink {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+
+        /* 표정별 이모지 */
+        .avatar.happy .avatar-emoji::before { content: '😊'; }
+        .avatar.sad .avatar-emoji::before { content: '😢'; }
+        .avatar.surprised .avatar-emoji::before { content: '😲'; }
+        .avatar.thinking .avatar-emoji::before { content: '🤔'; }
+        .avatar.angry .avatar-emoji::before { content: '😠'; }
+
+        /* 닫기 버튼 */
+        .close-btn {
+            position: absolute;
+            top: -8px;
+            left: -8px;
+            width: 24px;
+            height: 24px;
+            background: #ff4757;
+            color: white;
+            border: 2px solid white;
+            border-radius: 50%;
+            font-size: 14px;
+            cursor: pointer;
+            display: none;
+            align-items: center;
+            justify-content: center;
+            box-shadow: 0 2px 8px rgba(255, 71, 87, 0.4);
+        }
+
+        .avatar-wrapper:hover .close-btn {
+            display: flex;
+        }
+
+        .close-btn:hover {
+            transform: scale(1.1);
+        }
+
+        /* 로딩 애니메이션 */
+        .loading-dots {
+            display: inline-flex;
+            gap: 4px;
+        }
+
+        .loading-dots span {
+            width: 6px;
+            height: 6px;
+            background: white;
+            border-radius: 50%;
+            animation: loading 1.4s infinite;
+        }
+
+        .loading-dots span:nth-child(2) { animation-delay: 0.2s; }
+        .loading-dots span:nth-child(3) { animation-delay: 0.4s; }
+
+        @keyframes loading {
+            0%, 80%, 100% { transform: scale(0.6); opacity: 0.5; }
+            40% { transform: scale(1); opacity: 1; }
+        }
+
+        /* 아바타 이미지가 있을 때 */
+        .avatar.has-image {
+            background: white;
+        }
+
+        .avatar.has-image img {
+            border-radius: 50%;
+        }
+    </style>
+</head>
+<body>
+    <div class="floating-avatar" id="floatingAvatar">
+        <!-- 말풍선 -->
+        <div class="speech-bubble" id="speechBubble">
+            <div class="message-text" id="messageText">안녕하세요! 무엇을 도와드릴까요? 😊</div>
+            <div class="message-time" id="messageTime"></div>
+        </div>
+
+        <!-- 입력 영역 -->
+        <div class="input-area" id="inputArea">
+            <input type="text" id="chatInput" placeholder="메시지를 입력하세요..." />
+            <button class="mic-btn" id="micBtn" title="음성 입력">🎤</button>
+            <button class="send-btn" id="sendBtn" title="전송">➤</button>
+        </div>
+
+        <!-- 아바타 -->
+        <div class="avatar-wrapper" id="avatarWrapper">
+            <button class="close-btn" id="closeBtn" title="닫기">✕</button>
+            <div class="avatar" id="avatar">
+                <!-- 이미지가 있으면 표시, 없으면 이모지 -->
+                <img src="images/face/ass_plain.png" alt="Alpha" onerror="this.style.display='none'; this.nextElementSibling.style.display='block';" />
+                <span class="avatar-emoji" style="display: none;">🤖</span>
+            </div>
+            <div class="status-dot" id="statusDot"></div>
+        </div>
+    </div>
+
+    <script>
+        // 상태 관리
+        const state = {
+            isExpanded: false,
+            isRecording: false,
+            isDragging: false,
+            currentEmotion: 'normal',
+            mediaRecorder: null,
+            audioChunks: []
+        };
+
+        // DOM 요소
+        const elements = {
+            floatingAvatar: document.getElementById('floatingAvatar'),
+            speechBubble: document.getElementById('speechBubble'),
+            inputArea: document.getElementById('inputArea'),
+            avatar: document.getElementById('avatar'),
+            avatarWrapper: document.getElementById('avatarWrapper'),
+            chatInput: document.getElementById('chatInput'),
+            sendBtn: document.getElementById('sendBtn'),
+            micBtn: document.getElementById('micBtn'),
+            closeBtn: document.getElementById('closeBtn'),
+            messageText: document.getElementById('messageText'),
+            messageTime: document.getElementById('messageTime'),
+            statusDot: document.getElementById('statusDot')
+        };
+
+        // 시간 포맷
+        function formatTime() {
+            const now = new Date();
+            return now.toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit' });
+        }
+
+        // 아바타 클릭 - 확장/축소
+        elements.avatar.addEventListener('click', (e) => {
+            if (state.isDragging) return;
+            e.stopPropagation();
+            toggleExpand();
+        });
+
+        function toggleExpand() {
+            state.isExpanded = !state.isExpanded;
+            
+            if (state.isExpanded) {
+                elements.speechBubble.classList.add('show');
+                elements.inputArea.classList.add('show');
+                elements.chatInput.focus();
+            } else {
+                elements.speechBubble.classList.remove('show');
+                elements.inputArea.classList.remove('show');
+            }
+        }
+
+        // 닫기 버튼
+        elements.closeBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            if (window.overlay?.close) {
+                window.overlay.close();
+            } else {
+                window.close();
+            }
+        });
+
+        // 메시지 전송
+        elements.sendBtn.addEventListener('click', sendMessage);
+        elements.chatInput.addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') sendMessage();
+        });
+
+        async function sendMessage() {
+            const message = elements.chatInput.value.trim();
+            if (!message) return;
+
+            elements.chatInput.value = '';
+            showLoading();
+
+            try {
+                const response = await fetch('http://localhost:3030/chat', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ message })
+                });
+
+                const data = await response.json();
+                showMessage(data.reply, data.emotion);
+            } catch (error) {
+                showMessage('연결 오류가 발생했어요 😅', 'sad');
+            }
+        }
+
+        // 로딩 표시
+        function showLoading() {
+            elements.messageText.innerHTML = '<div class="loading-dots"><span></span><span></span><span></span></div>';
+            elements.statusDot.classList.add('thinking');
+            elements.speechBubble.classList.add('show');
+        }
+
+        // ========== ElevenLabs TTS ==========
+        let currentAudio = null;
+        
+        async function speakText(text, emotion = 'normal') {
+            // 이전 오디오 중지
+            if (currentAudio) {
+                currentAudio.pause();
+                currentAudio = null;
+            }
+            
+            try {
+                elements.statusDot.classList.add('speaking');
+                console.log('ElevenLabs TTS 요청:', text.substring(0, 50));
+                
+                const response = await fetch('http://localhost:3030/text-to-speech', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ 
+                        text,
+                        model: 'eleven_multilingual_v2'
+                    })
+                });
+                
+                if (!response.ok) {
+                    throw new Error(`TTS 오류: ${response.status}`);
+                }
+                
+                const audioBlob = await response.blob();
+                console.log('TTS 응답 받음, 크기:', audioBlob.size);
+                
+                const audioUrl = URL.createObjectURL(audioBlob);
+                currentAudio = new Audio(audioUrl);
+                
+                currentAudio.onended = () => {
+                    elements.statusDot.classList.remove('speaking');
+                    URL.revokeObjectURL(audioUrl);
+                    currentAudio = null;
+                };
+                
+                currentAudio.onerror = (e) => {
+                    console.error('오디오 재생 오류:', e);
+                    elements.statusDot.classList.remove('speaking');
+                    URL.revokeObjectURL(audioUrl);
+                    currentAudio = null;
+                };
+                
+                await currentAudio.play();
+                console.log('TTS 재생 시작');
+                
+            } catch (error) {
+                console.error('TTS 오류:', error);
+                elements.statusDot.classList.remove('speaking');
+            }
+        }
+
+        // 메시지 표시
+        function showMessage(text, emotion = 'normal') {
+            elements.messageText.textContent = text;
+            elements.messageTime.textContent = formatTime();
+            elements.statusDot.classList.remove('thinking', 'speaking');
+            
+            // 표정 변경
+            changeExpression(emotion);
+            
+            // TTS 재생
+            speakText(text, emotion);
+            
+            // 자동 닫기 (10초 후)
+            setTimeout(() => {
+                if (state.isExpanded) {
+                    // 입력 중이 아니면 말풍선만 숨기기
+                    if (!elements.chatInput.value) {
+                        elements.speechBubble.classList.remove('show');
+                    }
+                }
+            }, 10000);
+        }
+
+        // 표정 변경
+        function changeExpression(emotion) {
+            const imgMap = {
+                'normal': 'ass_plain.png',
+                'happy': 'ass_talking.png',
+                'sad': 'ass_sad.png',
+                'surprised': 'ass_surpirsed.png',
+                'thinking': 'ass_tired.png',
+                'angry': 'ass_angry.png'
+            };
+
+            const img = elements.avatar.querySelector('img');
+            if (img && imgMap[emotion]) {
+                img.src = `images/face/${imgMap[emotion]}`;
+            }
+
+            state.currentEmotion = emotion;
+        }
+
+        // 음성 녹음
+        elements.micBtn.addEventListener('click', toggleRecording);
+
+        async function toggleRecording() {
+            if (state.isRecording) {
+                stopRecording();
+            } else {
+                startRecording();
+            }
+        }
+
+        async function startRecording() {
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                state.mediaRecorder = new MediaRecorder(stream);
+                state.audioChunks = [];
+
+                state.mediaRecorder.ondataavailable = (e) => {
+                    state.audioChunks.push(e.data);
+                };
+
+                state.mediaRecorder.onstop = async () => {
+                    const audioBlob = new Blob(state.audioChunks, { type: 'audio/webm' });
+                    await sendVoiceMessage(audioBlob);
+                    stream.getTracks().forEach(track => track.stop());
+                };
+
+                state.mediaRecorder.start();
+                state.isRecording = true;
+                elements.micBtn.classList.add('recording');
+                elements.micBtn.textContent = '⏹';
+                elements.statusDot.classList.add('speaking');
+
+            } catch (error) {
+                console.error('마이크 접근 오류:', error);
+                showMessage('마이크를 사용할 수 없어요 😅', 'sad');
+            }
+        }
+
+        function stopRecording() {
+            if (state.mediaRecorder && state.isRecording) {
+                state.mediaRecorder.stop();
+                state.isRecording = false;
+                elements.micBtn.classList.remove('recording');
+                elements.micBtn.textContent = '🎤';
+                showLoading();
+            }
+        }
+
+        async function sendVoiceMessage(audioBlob) {
+            try {
+                const formData = new FormData();
+                formData.append('audio', audioBlob, 'recording.webm');
+
+                const response = await fetch('http://localhost:3030/chat/voice', {
+                    method: 'POST',
+                    body: formData
+                });
+
+                const data = await response.json();
+                showMessage(data.reply, data.emotion);
+
+            } catch (error) {
+                console.error('음성 전송 오류:', error);
+                showMessage('음성 인식에 실패했어요 😅', 'sad');
+            }
+        }
+
+        // 드래그 기능
+        let dragOffset = { x: 0, y: 0 };
+
+        elements.avatarWrapper.addEventListener('mousedown', (e) => {
+            if (e.target === elements.closeBtn) return;
+            
+            state.isDragging = false;
+            dragOffset = {
+                x: e.clientX,
+                y: e.clientY
+            };
+
+            document.addEventListener('mousemove', onDrag);
+            document.addEventListener('mouseup', onDragEnd);
+        });
+
+        function onDrag(e) {
+            const dx = e.clientX - dragOffset.x;
+            const dy = e.clientY - dragOffset.y;
+
+            if (Math.abs(dx) > 5 || Math.abs(dy) > 5) {
+                state.isDragging = true;
+            }
+
+            if (state.isDragging && window.overlay?.moveBy) {
+                window.overlay.moveBy(dx, dy);
+                dragOffset = { x: e.clientX, y: e.clientY };
+            }
+        }
+
+        function onDragEnd() {
+            document.removeEventListener('mousemove', onDrag);
+            document.removeEventListener('mouseup', onDragEnd);
+            
+            setTimeout(() => {
+                state.isDragging = false;
+            }, 100);
+        }
+
+        // 외부 클릭 시 축소
+        document.addEventListener('click', (e) => {
+            if (!elements.floatingAvatar.contains(e.target) && state.isExpanded) {
+                toggleExpand();
+            }
+        });
+
+        // 초기화
+        document.addEventListener('DOMContentLoaded', () => {
+            console.log('🚀 Alpha 플로팅 아바타 시작!');
+            elements.messageTime.textContent = formatTime();
+            
+            // 잠시 후 환영 메시지 표시
+            setTimeout(() => {
+                elements.speechBubble.classList.add('show');
+                setTimeout(() => {
+                    elements.speechBubble.classList.remove('show');
+                }, 5000);
+            }, 1000);
+        });
+
+        // 외부에서 제어할 수 있는 API
+        window.alphaAvatar = {
+            show: () => { state.isExpanded = false; toggleExpand(); },
+            hide: () => { state.isExpanded = true; toggleExpand(); },
+            speak: (text, emotion) => showMessage(text, emotion),
+            setExpression: (emotion) => changeExpression(emotion)
+        };
+    </script>
+</body>
+</html>

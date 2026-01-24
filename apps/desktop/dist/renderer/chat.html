@@ -1,0 +1,625 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Virtual Assistant Chat</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            background: #1a1a1a; /* 어두운 배경색 */
+            font-family: 'Arial', sans-serif;
+            color: white;
+            height: 100vh;
+            width: 100vw;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+            position: relative;
+        }
+
+        .chat-container {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            width: 100%;
+            height: 100%;
+            pointer-events: auto;
+            background: rgba(0, 0, 0, 0.8);
+            border-radius: 15px;
+            padding: 15px;
+            box-sizing: border-box;
+            overflow: hidden;
+        }
+
+        /* 드래그 영역 제거 (프레임 사용 시 불필요) */
+
+        .chat-header {
+            text-align: center;
+            margin-bottom: 10px;
+            padding: 15px;
+            background: rgba(78, 205, 196, 0.2);
+            border-radius: 10px;
+            backdrop-filter: blur(10px);
+            flex-shrink: 0;
+        }
+
+        .chat-header h1 {
+            margin: 0;
+            color: #4ecdc4;
+            font-size: 18px;
+        }
+
+        .chat-header p {
+            margin: 5px 0 0 0;
+            font-size: 12px;
+            color: rgba(255, 255, 255, 0.7);
+        }
+
+
+        .chat-messages {
+            flex: 1;
+            min-height: 0;
+            overflow-y: auto;
+            overflow-x: visible; /* 말풍선 꼬리가 잘리지 않도록 */
+            padding: 10px 15px; /* 좌우 패딩 증가 */
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 10px;
+            margin-bottom: 10px;
+            backdrop-filter: blur(10px);
+            -webkit-app-region: no-drag; /* 드래그 비활성화 */
+        }
+
+        .message {
+            margin-bottom: 12px;
+            padding: 10px 14px;
+            border-radius: 18px;
+            max-width: 70%; /* 말풍선 꼬리 공간 확보 */
+            word-wrap: break-word;
+            overflow-wrap: break-word;
+            font-size: 13px;
+            line-height: 1.5;
+            position: relative;
+            box-shadow: 0 2px 5px rgba(0, 0, 0, 0.2);
+            margin-left: 10px; /* 왼쪽 여백 */
+            margin-right: 10px; /* 오른쪽 여백 */
+        }
+
+        .message.user {
+            background: linear-gradient(135deg, rgba(78, 205, 196, 0.9), rgba(69, 183, 184, 0.9));
+            margin-left: auto;
+            text-align: left;
+            color: white;
+            border-bottom-right-radius: 4px;
+        }
+
+        .message.user {
+            margin-left: auto;
+            margin-right: 10px; /* 오른쪽 여백 확보 */
+        }
+
+        .message.user::after {
+            content: '';
+            position: absolute;
+            right: -6px;
+            bottom: 12px;
+            width: 0;
+            height: 0;
+            border: 6px solid transparent;
+            border-left-color: rgba(69, 183, 184, 0.9);
+            border-top: none;
+            border-right: none;
+            z-index: 1;
+        }
+
+        .message.assistant {
+            background: rgba(255, 255, 255, 0.95);
+            margin-left: 10px; /* 왼쪽 여백 확보 */
+            margin-right: auto;
+            color: #333;
+            border-bottom-left-radius: 4px;
+        }
+
+        .message.assistant::before {
+            content: '';
+            position: absolute;
+            left: -6px;
+            bottom: 12px;
+            width: 0;
+            height: 0;
+            border: 6px solid transparent;
+            border-right-color: rgba(255, 255, 255, 0.95);
+            border-top: none;
+            border-left: none;
+            z-index: 1;
+        }
+
+        .chat-input-container {
+            display: flex;
+            gap: 8px;
+            flex-shrink: 0;
+        }
+
+        .chat-input {
+            flex: 1;
+            padding: 10px 15px;
+            border: 2px solid rgba(255, 255, 255, 0.3);
+            border-radius: 20px;
+            font-size: 14px;
+            outline: none;
+            background: rgba(255, 255, 255, 0.1);
+            backdrop-filter: blur(10px);
+            color: white;
+            box-sizing: border-box;
+            -webkit-app-region: no-drag; /* 드래그 비활성화 */
+        }
+
+        .chat-input:focus {
+            border-color: #4ecdc4;
+        }
+
+        .chat-input::placeholder {
+            color: rgba(255, 255, 255, 0.7);
+        }
+
+        .send-btn {
+            padding: 10px 20px;
+            background: rgba(78, 205, 196, 0.8);
+            color: white;
+            border: none;
+            border-radius: 20px;
+            font-size: 14px;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            backdrop-filter: blur(10px);
+            white-space: nowrap;
+            -webkit-app-region: no-drag; /* 드래그 비활성화 */
+        }
+
+        .send-btn:hover {
+            background: rgba(69, 183, 184, 0.9);
+        }
+
+        .send-btn:active {
+            transform: scale(0.95);
+        }
+
+        .mic-btn {
+            padding: 10px;
+            background: rgba(255, 100, 100, 0.8);
+            color: white;
+            border: none;
+            border-radius: 50%;
+            width: 40px;
+            height: 40px;
+            font-size: 18px;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            backdrop-filter: blur(10px);
+            -webkit-app-region: no-drag;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .mic-btn:hover {
+            background: rgba(255, 80, 80, 0.9);
+        }
+
+        .mic-btn.recording {
+            background: rgba(255, 50, 50, 1);
+            animation: pulse 1s infinite;
+        }
+
+        @keyframes pulse {
+            0%, 100% { transform: scale(1); }
+            50% { transform: scale(1.1); }
+        }
+
+        .status {
+            text-align: center;
+            margin-top: 5px;
+            color: rgba(255, 255, 255, 0.7);
+            font-size: 11px;
+            flex-shrink: 0;
+        }
+    </style>
+</head>
+<body>
+    <div class="chat-container">
+        <div class="chat-header">
+            <h1>🎭 알파와 채팅하기</h1>
+            <p>AI 비서 알파와 대화해보세요!</p>
+        </div>
+        
+        <div class="chat-messages" id="chatMessages">
+            <div class="message assistant">
+                안녕하세요! 저는 알파예요! 무엇을 도와드릴까요? 😊
+            </div>
+        </div>
+        
+        <div class="chat-input-container">
+            <button class="mic-btn" id="micBtn" title="음성으로 말하기">🎤</button>
+            <input type="text" class="chat-input" id="chatInput" placeholder="알파에게 말해보세요..." onkeypress="handleKeyPress(event)">
+            <button class="send-btn" onclick="sendMessage()">전송</button>
+        </div>
+        
+        <div class="status" id="status">연결됨</div>
+    </div>
+
+    <script>
+        // ========== ElevenLabs TTS ==========
+        let currentAudio = null;
+        
+        async function speakText(text, emotion = 'normal') {
+            const status = document.getElementById('status');
+            
+            // 이전 오디오 중지
+            if (currentAudio) {
+                currentAudio.pause();
+                currentAudio = null;
+            }
+            
+            try {
+                if (status) status.textContent = '음성 생성 중...';
+                console.log('ElevenLabs TTS 요청:', text.substring(0, 50));
+                
+                const response = await fetch('http://localhost:3030/text-to-speech', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ 
+                        text,
+                        model: 'eleven_multilingual_v2'
+                    })
+                });
+                
+                if (!response.ok) {
+                    throw new Error(`TTS 오류: ${response.status}`);
+                }
+                
+                const audioBlob = await response.blob();
+                console.log('TTS 응답 받음, 크기:', audioBlob.size);
+                
+                const audioUrl = URL.createObjectURL(audioBlob);
+                currentAudio = new Audio(audioUrl);
+                
+                currentAudio.onplay = () => {
+                    console.log('음성 재생 시작');
+                    if (status) status.textContent = '음성 재생 중...';
+                };
+                
+                currentAudio.onended = () => {
+                    console.log('음성 재생 완료');
+                    if (status) status.textContent = '연결됨';
+                    URL.revokeObjectURL(audioUrl);
+                    currentAudio = null;
+                };
+                
+                currentAudio.onerror = (e) => {
+                    console.error('오디오 재생 오류:', e);
+                    if (status) status.textContent = '연결됨';
+                    URL.revokeObjectURL(audioUrl);
+                    currentAudio = null;
+                };
+                
+                await currentAudio.play();
+                
+            } catch (error) {
+                console.error('TTS 오류:', error);
+                if (status) status.textContent = '연결됨';
+            }
+        }
+        
+        // ========== 메시지 전송 ==========
+        // 메시지 전송
+        async function sendMessage() {
+            console.log('sendMessage 호출됨');
+            const input = document.getElementById('chatInput');
+            const messages = document.getElementById('chatMessages');
+            const status = document.getElementById('status');
+            
+            if (!input || !messages || !status) {
+                console.error('필수 요소를 찾을 수 없습니다:', { input, messages, status });
+                return;
+            }
+            
+            const message = input.value.trim();
+            console.log('입력된 메시지:', message);
+            
+            if (!message) {
+                console.log('메시지가 비어있음');
+                return;
+            }
+
+            // 사용자 메시지 표시
+            const userMessage = document.createElement('div');
+            userMessage.className = 'message user';
+            userMessage.textContent = message;
+            messages.appendChild(userMessage);
+            
+            input.value = '';
+            input.focus(); // 입력 후 다시 포커스
+            status.textContent = 'AI가 응답 중...';
+            // 스크롤을 약간 지연시켜 DOM 업데이트 후 실행
+            setTimeout(() => {
+                messages.scrollTop = messages.scrollHeight;
+            }, 100);
+
+            try {
+                // 1. 먼저 텍스트 응답만 받기 (빠른 응답)
+                const requestBody = { 
+                    message: message
+                };
+                console.log('클라이언트 요청:', requestBody);
+                
+                const response = await fetch('http://localhost:3030/chat', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify(requestBody)
+                });
+                
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+                
+                const data = await response.json();
+                console.log('서버 응답:', data);
+                
+                // 2. AI 응답 표시
+                if (data.reply) {
+                    const aiMessage = document.createElement('div');
+                    aiMessage.className = 'message assistant';
+                    aiMessage.textContent = data.reply;
+                    messages.appendChild(aiMessage);
+                    setTimeout(() => {
+                        messages.scrollTop = messages.scrollHeight;
+                    }, 100);
+                }
+                
+                // 3. Web Speech API로 TTS 처리 (브라우저 내장)
+                if (data.reply) {
+                    speakText(data.reply, data.emotion || 'normal');
+                }
+                
+                input.focus(); // 응답 후 입력 필드 포커스
+                setTimeout(() => {
+                    messages.scrollTop = messages.scrollHeight;
+                }, 100);
+                
+            } catch (error) {
+                const errorMessage = document.createElement('div');
+                errorMessage.className = 'message assistant';
+                errorMessage.textContent = `오류: ${error.message}`;
+                messages.appendChild(errorMessage);
+                
+                status.textContent = '연결 오류';
+                input.focus();
+                setTimeout(() => {
+                    messages.scrollTop = messages.scrollHeight;
+                }, 100);
+            }
+        }
+
+        // 엔터키 처리
+        function handleKeyPress(event) {
+            if (event.key === 'Enter') {
+                sendMessage();
+            }
+        }
+
+        // 음성 녹음 기능
+        let mediaRecorder = null;
+        let audioChunks = [];
+        let isRecording = false;
+
+        async function startRecording() {
+            console.log('startRecording 호출됨');
+            try {
+                console.log('마이크 접근 시도...');
+                const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                console.log('마이크 접근 성공');
+                mediaRecorder = new MediaRecorder(stream, {
+                    mimeType: 'audio/webm;codecs=opus'
+                });
+                
+                audioChunks = [];
+                
+                mediaRecorder.ondataavailable = (event) => {
+                    if (event.data.size > 0) {
+                        audioChunks.push(event.data);
+                    }
+                };
+                
+                mediaRecorder.onstop = async () => {
+                    const audioBlob = new Blob(audioChunks, { type: 'audio/webm' });
+                    await sendVoiceMessage(audioBlob);
+                    
+                    // 스트림 정리
+                    stream.getTracks().forEach(track => track.stop());
+                };
+                
+                mediaRecorder.start();
+                isRecording = true;
+                
+                const micBtn = document.getElementById('micBtn');
+                const status = document.getElementById('status');
+                micBtn.classList.add('recording');
+                micBtn.textContent = '⏹️';
+                status.textContent = '녹음 중... (다시 클릭하면 전송)';
+                
+            } catch (error) {
+                console.error('마이크 접근 오류:', error);
+                const status = document.getElementById('status');
+                status.textContent = '마이크 접근 권한이 필요합니다';
+                alert('마이크 접근 권한을 허용해주세요!');
+            }
+        }
+
+        function stopRecording() {
+            console.log('stopRecording 호출됨, mediaRecorder:', mediaRecorder, 'isRecording:', isRecording);
+            if (mediaRecorder && isRecording) {
+                console.log('녹음 중지 중...');
+                mediaRecorder.stop();
+                isRecording = false;
+                
+                const micBtn = document.getElementById('micBtn');
+                const status = document.getElementById('status');
+                micBtn.classList.remove('recording');
+                micBtn.textContent = '🎤';
+                status.textContent = '음성 전송 중...';
+            }
+        }
+
+        async function sendVoiceMessage(audioBlob) {
+            try {
+                const messages = document.getElementById('chatMessages');
+                const status = document.getElementById('status');
+                
+                // 🔥 타임아웃 헬퍼 함수
+                const fetchWithTimeout = (url, options, timeout = 20000) => {
+                    return Promise.race([
+                        fetch(url, options),
+                        new Promise((_, reject) => 
+                            setTimeout(() => reject(new Error('요청 시간 초과 (20초)')), timeout)
+                        )
+                    ]);
+                };
+                
+                // 1. 먼저 STT로 음성을 텍스트로 변환
+                status.textContent = '🎙️ 음성 인식 중...';
+                const sttFormData = new FormData();
+                sttFormData.append('audio', audioBlob, 'recording.webm');
+                
+                const sttResponse = await fetchWithTimeout('http://localhost:3030/speech-to-text', {
+                    method: 'POST',
+                    body: sttFormData
+                }, 20000);
+                
+                if (!sttResponse.ok) {
+                    const errorData = await sttResponse.json().catch(() => ({}));
+                    throw new Error(errorData.error || `STT 오류: ${sttResponse.status}`);
+                }
+                
+                const sttData = await sttResponse.json();
+                const recognizedText = sttData.text;
+                
+                if (!recognizedText || recognizedText.trim().length === 0) {
+                    status.textContent = '음성을 인식할 수 없습니다';
+                    return;
+                }
+                
+                // 사용자 음성 메시지 표시
+                const userMessage = document.createElement('div');
+                userMessage.className = 'message user';
+                userMessage.textContent = recognizedText;
+                messages.appendChild(userMessage);
+                
+                // 2. 인식된 텍스트로 채팅 요청 (텍스트만 먼저 받기)
+                const requestBody = { 
+                    message: recognizedText
+                };
+                
+                status.textContent = 'AI가 응답 중...';
+                
+                const response = await fetch('http://localhost:3030/chat', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify(requestBody)
+                });
+                
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+                
+                const data = await response.json();
+                console.log('음성 채팅 응답:', data);
+                
+                // 2-1. AI 응답 표시
+                if (data.reply) {
+                    const aiMessage = document.createElement('div');
+                    aiMessage.className = 'message assistant';
+                    aiMessage.textContent = data.reply;
+                    messages.appendChild(aiMessage);
+                    setTimeout(() => {
+                        messages.scrollTop = messages.scrollHeight;
+                    }, 100);
+                }
+                
+                // 3. Web Speech API로 TTS 처리 (브라우저 내장)
+                if (data.reply) {
+                    speakText(data.reply, data.emotion || 'normal');
+                }
+                
+                setTimeout(() => {
+                    messages.scrollTop = messages.scrollHeight;
+                }, 100);
+                
+            } catch (error) {
+                console.error('음성 전송 오류:', error);
+                status.textContent = '음성 전송 실패: ' + error.message;
+            }
+        }
+
+        // 자동 포커스 및 입력 필드 이벤트 처리
+        document.addEventListener('DOMContentLoaded', function() {
+            console.log('DOMContentLoaded 실행됨');
+            
+            // 마이크 버튼 이벤트
+            const micBtn = document.getElementById('micBtn');
+            console.log('마이크 버튼:', micBtn);
+            if (micBtn) {
+                micBtn.addEventListener('click', function() {
+                    console.log('마이크 버튼 클릭됨, isRecording:', isRecording);
+                    if (isRecording) {
+                        stopRecording();
+                    } else {
+                        startRecording();
+                    }
+                });
+            } else {
+                console.error('마이크 버튼을 찾을 수 없습니다!');
+            }
+            
+            // 전송 버튼도 이벤트 리스너로 연결 (onclick 대신)
+            const sendBtn = document.querySelector('.send-btn');
+            if (sendBtn) {
+                sendBtn.addEventListener('click', function() {
+                    console.log('전송 버튼 클릭됨');
+                    sendMessage();
+                });
+            }
+            
+            const input = document.getElementById('chatInput');
+            if (input) {
+                // 포커스 설정
+                setTimeout(() => {
+                    input.focus();
+                }, 100);
+                
+                // 입력 필드가 항상 클릭 가능하도록
+                input.addEventListener('click', function(e) {
+                    e.stopPropagation();
+                });
+                
+                // 입력 필드 포커스 유지
+                input.addEventListener('blur', function() {
+                    setTimeout(() => {
+                        input.focus();
+                    }, 50);
+                });
+            }
+            
+            // 메시지 영역 자동 스크롤
+            const messages = document.getElementById('chatMessages');
+            if (messages) {
+                messages.scrollTop = messages.scrollHeight;
+            }
+        });
+    </script>
+</body>
+</html>
