@@ -11,4 +11,15 @@ contextBridge.exposeInMainWorld("overlay", {
     // 기존 setBounds (호환성)
     setBounds: (payload) => ipcRenderer.send("overlay:set-bounds", payload)
 });
+// 리마인더 알림 브릿지
+contextBridge.exposeInMainWorld("reminder", {
+    // 리마인더 이벤트 수신
+    onReminder: (callback) => {
+        ipcRenderer.on("reminder", (_event, data) => callback(data));
+    },
+    // 리스너 제거
+    removeListener: () => {
+        ipcRenderer.removeAllListeners("reminder");
+    }
+});
 //# sourceMappingURL=preload.js.map

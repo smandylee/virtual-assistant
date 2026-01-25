@@ -41,6 +41,10 @@ const express_1 = __importDefault(require("express"));
 const cors_1 = __importDefault(require("cors"));
 const multer_1 = __importDefault(require("multer"));
 const genai_1 = require("@google/genai");
+const child_process_1 = require("child_process");
+const path_1 = __importDefault(require("path"));
+const promises_1 = __importDefault(require("fs/promises"));
+const os_1 = __importDefault(require("os"));
 const db_1 = require("../memory/db");
 const gemini_1 = require("../agent/gemini");
 const tools_route_1 = require("./tools-route");
@@ -98,6 +102,172 @@ const upload = (0, multer_1.default)({
 (0, db_1.initDb)();
 // 간단 헬스체크
 app.get("/health", (_req, res) => res.json({ ok: true }));
+// ==================== 화자 인증 (Voice Authentication) ====================
+// 화자 인증 활성화 여부
+let voiceAuthEnabled = false;
+// Python 스크립트 실행 함수
+async function runSpeakerAuth(command, args = []) {
+    return new Promise((resolve, reject) => {
+        const scriptPath = path_1.default.join(process.cwd(), "voice-auth", "speaker_auth.py");
+        const pythonCmd = process.platform === "win32" ? "python" : "python3";
+        const proc = (0, child_process_1.spawn)(pythonCmd, [scriptPath, command, ...args], {
+            cwd: process.cwd(),
+            stdio: ["pipe", "pipe", "pipe"]
+        });
+        let stdout = "";
+        let stderr = "";
+        proc.stdout.on("data", (data) => {
+            stdout += data.toString();
+        });
+        proc.stderr.on("data", (data) => {
+            stderr += data.toString();
+        });
+        proc.on("close", (code) => {
+            if (code === 0) {
+                try {
+                    const result = JSON.parse(stdout.trim());
+                    resolve(result);
+                }
+                catch (e) {
+                    resolve({ success: true, output: stdout.trim() });
+                }
+            }
+            else {
+                reject(new Error(stderr || `프로세스 종료 코드: ${code}`));
+            }
+        });
+        proc.on("error", (err) => {
+            reject(err);
+        });
+    });
+}
+// 화자 인증 상태 확인
+app.get("/voice-auth/status", async (_req, res) => {
+    try {
+        const result = await runSpeakerAuth("check");
+        res.json({
+            ...result,
+            enabled: voiceAuthEnabled
+        });
+    }
+    catch (error) {
+        res.status(500).json({
+            success: false,
+            error: error.message,
+            hint: "Python과 Resemblyzer가 설치되어 있는지 확인하세요."
+        });
+    }
+});
+// 화자 인증 활성화/비활성화
+app.post("/voice-auth/toggle", (req, res) => {
+    const { enabled } = req.body;
+    voiceAuthEnabled = enabled !== undefined ? enabled : !voiceAuthEnabled;
+    res.json({
+        success: true,
+        enabled: voiceAuthEnabled,
+        message: voiceAuthEnabled ? "화자 인증이 활성화되었습니다." : "화자 인증이 비활성화되었습니다."
+    });
+});
+// 화자 등록 (음성 샘플 업로드)
+app.post("/voice-auth/enroll", upload.array("audio", 5), async (req, res) => {
+    try {
+        const files = req.files;
+        if (!files || files.length === 0) {
+            return res.status(400).json({
+                success: false,
+                error: "음성 파일이 필요합니다. 최소 1개, 권장 3개 이상의 음성 샘플을 업로드하세요."
+            });
+        }
+        // 임시 파일로 저장
+        const tempDir = path_1.default.join(os_1.default.tmpdir(), "voice-auth-enroll");
+        await promises_1.default.mkdir(tempDir, { recursive: true });
+        const tempPaths = [];
+        for (let i = 0; i < files.length; i++) {
+            const tempPath = path_1.default.join(tempDir, `sample_${i}.wav`);
+            await promises_1.default.writeFile(tempPath, files[i].buffer);
+            tempPaths.push(tempPath);
+        }
+        // Python 스크립트 실행
+        const speakerId = req.body.speakerId || "owner";
+        const result = await runSpeakerAuth("enroll", [...tempPaths, `--speaker-id=${speakerId}`]);
+        // 임시 파일 정리
+        for (const tempPath of tempPaths) {
+            await promises_1.default.unlink(tempPath).catch(() => { });
+        }
+        await promises_1.default.rmdir(tempDir).catch(() => { });
+        // 등록 성공 시 자동 활성화
+        if (result.success) {
+            voiceAuthEnabled = true;
+        }
+        res.json(result);
+    }
+    catch (error) {
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+// 화자 검증 (단일 음성)
+app.post("/voice-auth/verify", upload.single("audio"), async (req, res) => {
+    try {
+        if (!req.file) {
+            return res.status(400).json({
+                success: false,
+                error: "음성 파일이 필요합니다."
+            });
+        }
+        // 임시 파일로 저장
+        const tempPath = path_1.default.join(os_1.default.tmpdir(), `verify_${Date.now()}.wav`);
+        await promises_1.default.writeFile(tempPath, req.file.buffer);
+        // Python 스크립트 실행
+        const speakerId = req.body.speakerId || "owner";
+        const result = await runSpeakerAuth("verify", [tempPath, `--speaker-id=${speakerId}`]);
+        // 임시 파일 정리
+        await promises_1.default.unlink(tempPath).catch(() => { });
+        res.json(result);
+    }
+    catch (error) {
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+// 화자 등록 삭제
+app.delete("/voice-auth/enrollment", async (req, res) => {
+    try {
+        const speakerId = req.query.speakerId || "owner";
+        const result = await runSpeakerAuth("delete", [`--speaker-id=${speakerId}`]);
+        if (result.success) {
+            voiceAuthEnabled = false;
+        }
+        res.json(result);
+    }
+    catch (error) {
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+// 화자 검증 함수 (내부 사용)
+async function verifySpeaker(audioBuffer) {
+    if (!voiceAuthEnabled) {
+        return { verified: true }; // 비활성화 상태면 항상 통과
+    }
+    try {
+        // 임시 파일로 저장
+        const tempPath = path_1.default.join(os_1.default.tmpdir(), `verify_${Date.now()}.wav`);
+        await promises_1.default.writeFile(tempPath, audioBuffer);
+        // Python 스크립트 실행
+        const result = await runSpeakerAuth("verify", [tempPath]);
+        // 임시 파일 정리
+        await promises_1.default.unlink(tempPath).catch(() => { });
+        if (result.needs_enrollment) {
+            return { verified: true }; // 등록되지 않은 경우 통과 (첫 사용)
+        }
+        return {
+            verified: result.verified,
+            similarity: result.similarity
+        };
+    }
+    catch (error) {
+        console.error("화자 검증 오류:", error);
+        return { verified: true, error: error.message }; // 오류 시 통과 (fallback)
+    }
+}
 // 공통 시스템 프롬프트 도구 목록
 const AVAILABLE_TOOLS_PROMPT = `
 **사용 가능한 도구 목록 (이 목록에 없는 도구는 절대 사용하지 마세요!):**
@@ -123,6 +293,8 @@ app.post("/chat", async (req, res) => {
     console.log('채팅 요청 받음:', { message: message?.substring(0, 50), tts, ttsVoice, ttsModel });
     if (!message)
         return res.status(400).json({ error: "message required" });
+    // 🤖 능동적 AI: 상호작용 시간 업데이트 (전역 변수)
+    global.lastInteractionTime = Date.now();
     try {
         // 툴 사용 최소화 - 명확한 요청만 처리
         const hasFolderKeyword = message.includes('폴더') || message.includes('디렉토리') || message.includes('탐색기');
@@ -261,6 +433,7 @@ app.post("/chat", async (req, res) => {
         let toolSuccess = false;
         let toolResult = null;
         // JSON 도구 호출 파싱 및 실행
+        let toolCallDetected = false; // 🔥 도구 호출 감지 플래그
         try {
             let toolCall = null;
             // 1. 코드펜스 JSON 블록 찾기 (```json ... ```)
@@ -286,6 +459,7 @@ app.post("/chat", async (req, res) => {
             }
             if (toolCall && toolCall.tool) {
                 console.log('도구 호출 감지:', toolCall);
+                toolCallDetected = true; // 🔥 도구 호출 감지됨
                 // 경로 정리 (open_folder, open_file에서만)
                 if (toolCall.input && (toolCall.tool === 'open_folder' || toolCall.tool === 'open_file')) {
                     // 이상한 문자들을 정리
@@ -688,7 +862,6 @@ app.post("/chat", async (req, res) => {
                         else {
                             toolError = `알 수 없는 도구: ${toolCall.tool}. 사용 가능한 도구만 사용해주세요.`;
                         }
-                        toolError = `알 수 없는 도구: ${toolCall.tool}`;
                 }
             }
         }
@@ -696,13 +869,19 @@ app.post("/chat", async (req, res) => {
             console.error('도구 실행 오류:', error);
             toolError = error.message;
         }
-        // 🔥 도구 실행 성공시 자연스러운 응답으로 변환
+        // 🔥 도구 실행 결과에 따른 자연스러운 응답 생성
         if (toolSuccess && toolResult) {
             reply = generateNaturalResponse(toolResult, message);
         }
         else if (toolError) {
             reply = `죄송합니다. ${toolError}. 다시 시도해주시겠습니까.`;
         }
+        else if (toolCallDetected) {
+            // 🔥 도구 호출이 감지되었지만 실행되지 않은 경우 - JSON 응답 제거
+            reply = `말씀하신 작업을 처리하는 데 문제가 있었습니다. 다시 말씀해주시겠습니까.`;
+        }
+        // 🔥 응답에서 JSON이나 도구 이름이 남아있으면 제거
+        reply = cleanupReply(reply);
         const id = (0, db_1.logInteraction)(message, reply);
         // 감정 분석
         const emotion = analyzeEmotion(reply);
@@ -780,7 +959,7 @@ async function speechToText(audioBuffer, filename) {
                             }
                         },
                         {
-                            text: "Transcribe this audio in Korean. Output ONLY the transcription, nothing else."
+                            text: "Transcribe this audio exactly as spoken. If the speaker uses English words or phrases, keep them in English. If Korean, keep in Korean. Preserve the original language of each word. Output ONLY the transcription, nothing else. Do NOT translate."
                         }
                     ]
                 }],
@@ -939,6 +1118,21 @@ app.post("/chat/voice", upload.single('audio'), async (req, res) => {
         if (!req.file) {
             return res.status(400).json({ error: "오디오 파일이 필요합니다. 'audio' 필드로 파일을 업로드해주세요." });
         }
+        // 🔐 0. 화자 검증 (활성화된 경우)
+        if (voiceAuthEnabled) {
+            console.log('🔐 화자 검증 시작...');
+            const authResult = await verifySpeaker(req.file.buffer);
+            if (!authResult.verified) {
+                console.log(`❌ 화자 검증 실패: 유사도 ${authResult.similarity?.toFixed(2) || 'N/A'}`);
+                return res.status(403).json({
+                    error: "voice_auth_failed",
+                    message: "본인 확인에 실패했습니다. 등록된 목소리와 일치하지 않습니다.",
+                    similarity: authResult.similarity,
+                    verified: false
+                });
+            }
+            console.log(`✅ 화자 검증 성공: 유사도 ${authResult.similarity?.toFixed(2) || 'N/A'}`);
+        }
         // 1. 음성을 텍스트로 변환
         const message = await speechToText(req.file.buffer, req.file.originalname);
         console.log('음성 인식 결과:', message);
@@ -1084,6 +1278,7 @@ app.post("/chat/voice", upload.single('audio'), async (req, res) => {
         let toolSuccess = false;
         let toolResult = null;
         // JSON 도구 호출 파싱 및 실행 (기존 로직과 동일)
+        let toolCallDetected2 = false; // 🔥 도구 호출 감지 플래그
         try {
             let toolCall = null;
             const codeFenceMatch = reply.match(/```json\s*(\{[\s\S]*?\})\s*```/);
@@ -1106,6 +1301,7 @@ app.post("/chat/voice", upload.single('audio'), async (req, res) => {
             }
             if (toolCall && toolCall.tool) {
                 console.log('도구 호출 감지:', toolCall);
+                toolCallDetected2 = true; // 🔥 도구 호출 감지됨
                 if (toolCall.input && (toolCall.tool === 'open_folder' || toolCall.tool === 'open_file')) {
                     let cleanPath = toolCall.input
                         .replace(/WW/g, '\\')
@@ -1485,13 +1681,19 @@ app.post("/chat/voice", upload.single('audio'), async (req, res) => {
             console.error('도구 실행 오류:', error);
             toolError = error.message;
         }
-        // 🔥 도구 실행 성공시 자연스러운 응답으로 변환
+        // 🔥 도구 실행 결과에 따른 자연스러운 응답 생성
         if (toolSuccess && toolResult) {
             reply = generateNaturalResponse(toolResult, message);
         }
         else if (toolError) {
             reply = `죄송합니다. ${toolError}. 다시 시도해주시겠습니까.`;
         }
+        else if (toolCallDetected2) {
+            // 🔥 도구 호출이 감지되었지만 실행되지 않은 경우 - JSON 응답 제거
+            reply = `말씀하신 작업을 처리하는 데 문제가 있었습니다. 다시 말씀해주시겠습니까.`;
+        }
+        // 🔥 응답에서 JSON이나 도구 이름이 남아있으면 제거
+        reply = cleanupReply(reply);
         const id = (0, db_1.logInteraction)(message, reply);
         // 감정 분석
         const emotion = analyzeEmotion(reply);
@@ -1668,6 +1870,42 @@ app.post("/cleanup/patterns", (req, res) => {
         res.status(500).json({ error: error.message });
     }
 });
+// 🔥 응답에서 JSON, 도구 이름, 코드 블록 등을 제거하는 함수
+function cleanupReply(reply) {
+    let cleaned = reply;
+    // 1. 코드 블록 제거 (```json ... ```, ```...```)
+    cleaned = cleaned.replace(/```json[\s\S]*?```/g, '');
+    cleaned = cleaned.replace(/```[\s\S]*?```/g, '');
+    // 2. JSON 객체 제거 ({"tool": ...})
+    cleaned = cleaned.replace(/\{[^{}]*"tool"[^{}]*\}/g, '');
+    // 3. 도구 이름 패턴 제거 (open_folder, launch_program 등)
+    const toolNames = [
+        'open_folder', 'open_file', 'execute_command', 'search_files',
+        'web_search', 'news_search', 'add_schedule', 'get_schedules',
+        'delete_schedule', 'check_reminders', 'cleanup_expired_schedules',
+        'launch_steam_game', 'launch_program', 'youtube_search',
+        'youtube_play', 'youtube_channel', 'youtube_channel_videos',
+        'youtube_trending', 'youtube_video_info'
+    ];
+    for (const toolName of toolNames) {
+        // 도구 이름이 문장 내에 있으면 제거
+        const regex = new RegExp(`\\b${toolName}\\b`, 'gi');
+        cleaned = cleaned.replace(regex, '');
+    }
+    // 4. "tool:", "input:" 같은 JSON 키 패턴 제거
+    cleaned = cleaned.replace(/["']?tool["']?\s*:\s*["'][^"']*["']/gi, '');
+    cleaned = cleaned.replace(/["']?input["']?\s*:\s*["'][^"']*["']/gi, '');
+    // 5. 빈 괄호, 중복 공백 정리
+    cleaned = cleaned.replace(/\{\s*\}/g, '');
+    cleaned = cleaned.replace(/\[\s*\]/g, '');
+    cleaned = cleaned.replace(/\s+/g, ' ');
+    cleaned = cleaned.trim();
+    // 6. 응답이 너무 짧거나 의미없으면 기본 메시지로 대체
+    if (cleaned.length < 5 || /^[\s\.,\-_]+$/.test(cleaned)) {
+        return '말씀하신 작업을 처리해드렸습니다.';
+    }
+    return cleaned;
+}
 // 🔥 도구 실행 결과를 자연스러운 응답으로 변환하는 함수 (버틀러 파우스트 스타일)
 function generateNaturalResponse(toolResult, message) {
     // YouTube 관련
@@ -1891,18 +2129,98 @@ app.post("/youtube/voice-play", upload.single('audio'), async (req, res) => {
         res.status(500).json({ error: error.message });
     }
 });
+// ==================== 실시간 알림 시스템 (SSE) ====================
+// 연결된 클라이언트들을 저장
+const reminderClients = new Set();
+// SSE 리마인더 스트림 엔드포인트
+app.get("/reminders/stream", (req, res) => {
+    // SSE 헤더 설정
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+    res.setHeader('X-Accel-Buffering', 'no');
+    res.flushHeaders();
+    // 연결 확인 메시지
+    res.write(`data: ${JSON.stringify({ type: 'connected', message: '리마인더 스트림 연결됨' })}\n\n`);
+    // 클라이언트 등록
+    reminderClients.add(res);
+    console.log(`🔗 리마인더 클라이언트 연결됨 (총 ${reminderClients.size}개)`);
+    // 연결 종료 시 클라이언트 제거
+    req.on('close', () => {
+        reminderClients.delete(res);
+        console.log(`🔌 리마인더 클라이언트 연결 해제됨 (총 ${reminderClients.size}개)`);
+    });
+});
+// 모든 연결된 클라이언트에게 알림 전송
+function broadcastReminder(data) {
+    const message = `data: ${JSON.stringify(data)}\n\n`;
+    reminderClients.forEach(client => {
+        try {
+            client.write(message);
+        }
+        catch (error) {
+            console.error('알림 전송 실패:', error);
+            reminderClients.delete(client);
+        }
+    });
+}
+// 현재 시간 조회 엔드포인트
+app.get("/time", (_req, res) => {
+    const now = new Date();
+    const days = ['일요일', '월요일', '화요일', '수요일', '목요일', '금요일', '토요일'];
+    res.json({
+        timestamp: now.getTime(),
+        iso: now.toISOString(),
+        formatted: `${now.getFullYear()}년 ${now.getMonth() + 1}월 ${now.getDate()}일 ${days[now.getDay()]} ${now.getHours()}시 ${now.getMinutes()}분`,
+        date: `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`,
+        time: `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`
+    });
+});
+// 수동 리마인더 체크 엔드포인트
+app.get("/reminders/check", async (_req, res) => {
+    try {
+        const result = await index_1.tools.check_reminders.execute();
+        res.json(result);
+    }
+    catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
 const port = Number(process.env.PORT || 3030);
 app.listen(port, () => console.log("API listening on", port));
 // ==================== 자동 리마인더 백그라운드 작업 ====================
-// 5분마다 리마인더 체크
+// 이미 알린 리마인더 ID를 추적 (중복 알림 방지)
+const notifiedReminders = new Set();
+// 1분마다 리마인더 체크 (더 정밀하게)
 setInterval(async () => {
     try {
         const result = await index_1.tools.check_reminders.execute();
         if (result.reminders && result.reminders.length > 0) {
-            console.log(`🔔 리마인더: ${result.reminders.length}개의 일정이 곧 시작됩니다`);
-            result.reminders.forEach(reminder => {
-                console.log(`- ${reminder.title} (${reminder.minutesUntil}분 후)`);
-            });
+            console.log(`🔔 리마인더 체크: ${result.reminders.length}개의 일정이 곧 시작됩니다`);
+            for (const reminder of result.reminders) {
+                const reminderId = `${reminder.id || reminder.title}-${reminder.date}-${reminder.time}`;
+                // 이미 알린 리마인더는 스킵
+                if (notifiedReminders.has(reminderId)) {
+                    continue;
+                }
+                console.log(`📢 알림 전송: ${reminder.title} (${reminder.minutesUntil}분 후)`);
+                // SSE로 모든 클라이언트에게 알림 전송
+                broadcastReminder({
+                    type: 'reminder',
+                    title: reminder.title,
+                    date: reminder.date,
+                    time: reminder.time,
+                    minutesUntil: reminder.minutesUntil,
+                    description: reminder.description || '',
+                    message: `${reminder.minutesUntil}분 후에 "${reminder.title}" 일정이 있습니다.`
+                });
+                // 알림 전송됨 표시
+                notifiedReminders.add(reminderId);
+                // 24시간 후 자동 삭제 (메모리 관리)
+                setTimeout(() => {
+                    notifiedReminders.delete(reminderId);
+                }, 24 * 60 * 60 * 1000);
+            }
         }
         if (result.expired && typeof result.expired === 'number' && result.expired > 0) {
             console.log(`🗑️ 자동 정리: ${result.expired}개의 지난 일정이 삭제되었습니다`);
@@ -1911,6 +2229,213 @@ setInterval(async () => {
     catch (error) {
         console.error("리마인더 백그라운드 작업 오류:", error);
     }
-}, 5 * 60 * 1000); // 5분마다 실행
-console.log("⏰ 자동 리마인더가 시작되었습니다 (5분마다 체크)");
+}, 60 * 1000); // 1분마다 실행 (5분 -> 1분으로 변경)
+console.log("⏰ 자동 리마인더가 시작되었습니다 (1분마다 체크, SSE 알림 활성화)");
+// ==================== 능동적 AI (Proactive AI) ====================
+// 마지막 대화 시간 추적 (전역)
+global.lastInteractionTime = global.lastInteractionTime || Date.now();
+// 능동적 AI 설정
+const proactiveConfig = {
+    enabled: true, // 활성화 여부
+    greetingEnabled: true, // 시간대 인사
+    idleCheckEnabled: true, // 장시간 미사용 체크
+    idleThresholdMinutes: 30, // 미사용 임계값 (분)
+    randomChatEnabled: true, // 랜덤 대화
+    randomChatChance: 0.1, // 랜덤 대화 확률 (10%)
+    lastGreetingHour: -1, // 마지막 인사 시간 (중복 방지)
+    lastIdleCheck: 0, // 마지막 미사용 체크
+};
+// 능동적 AI 설정 조회/변경 엔드포인트
+app.get("/proactive/config", (_req, res) => {
+    res.json(proactiveConfig);
+});
+app.post("/proactive/config", (req, res) => {
+    const updates = req.body;
+    Object.assign(proactiveConfig, updates);
+    res.json({ success: true, config: proactiveConfig });
+});
+// 🧠 AI가 스스로 생각해서 메시지 생성
+async function generateProactiveMessage(context) {
+    const systemPrompt = `당신은 '파우스트'라는 이름의 버틀러입니다. 주인에게 먼저 말을 거는 상황입니다.
+
+**말투 규칙:**
+- 격식 있고 점잖은 경어체: '~하시죠', '~드리겠습니다', '~입니다'
+- 차분하고 절제된 어조
+- 이모지 절대 금지
+- 1문장으로 짧게 (최대 2문장)
+
+**현재 상황:**
+${context.timeInfo}
+${context.schedules && context.schedules.length > 0 ? `오늘 일정: ${context.schedules.map(s => `${s.time} ${s.title}`).join(', ')}` : '오늘 등록된 일정 없음'}
+${context.idleMinutes ? `주인이 ${Math.floor(context.idleMinutes)}분째 대화 없음` : ''}
+
+**말 거는 상황:** ${context.type === 'greeting' ? '시간대에 맞는 인사 (아침/점심/저녁/밤)' :
+        context.type === 'idle' ? '오랫동안 대화가 없어서 안부를 묻는 상황' :
+            '주인에게 도움이 될 만한 제안이나 질문'}
+
+**중요:**
+- 상황에 맞게 자연스럽게 말을 거세요
+- 일정이 있으면 언급해도 좋습니다
+- 날씨, 뉴스, 음악 등을 제안해도 좋습니다
+- 단순 인사만 하지 말고 무언가 제안하거나 질문하세요`;
+    try {
+        const response = await (0, gemini_1.chatWithGemini)(systemPrompt, "주인에게 먼저 말을 거세요.");
+        return response.trim();
+    }
+    catch (error) {
+        console.error('AI 메시지 생성 실패:', error);
+        // 폴백 메시지
+        const fallbacks = [
+            "필요하신 것이 있으시면 말씀하십시오.",
+            "무엇을 도와드릴까요.",
+            "부르셨습니까.",
+        ];
+        return fallbacks[Math.floor(Math.random() * fallbacks.length)];
+    }
+}
+// 오늘의 일정 가져오기
+async function getTodaySchedules() {
+    try {
+        const result = await index_1.tools.get_schedules.execute({
+            date: new Date().toISOString().split('T')[0],
+            upcoming: true
+        });
+        return result.schedules || [];
+    }
+    catch {
+        return [];
+    }
+}
+// 현재 시간 정보 생성
+function getCurrentTimeInfo() {
+    const now = new Date();
+    const days = ['일요일', '월요일', '화요일', '수요일', '목요일', '금요일', '토요일'];
+    const hour = now.getHours();
+    let timeOfDay = '';
+    if (hour >= 5 && hour < 9)
+        timeOfDay = '이른 아침';
+    else if (hour >= 9 && hour < 12)
+        timeOfDay = '오전';
+    else if (hour >= 12 && hour < 14)
+        timeOfDay = '점심 시간';
+    else if (hour >= 14 && hour < 18)
+        timeOfDay = '오후';
+    else if (hour >= 18 && hour < 21)
+        timeOfDay = '저녁';
+    else if (hour >= 21 && hour < 24)
+        timeOfDay = '밤';
+    else
+        timeOfDay = '새벽';
+    return `현재: ${now.getFullYear()}년 ${now.getMonth() + 1}월 ${now.getDate()}일 ${days[now.getDay()]} ${hour}시 ${now.getMinutes()}분 (${timeOfDay})`;
+}
+// 시간대별 인사 체크 (AI 생성)
+async function getTimeBasedGreeting() {
+    const now = new Date();
+    const hour = now.getHours();
+    // 이미 이 시간대에 인사했으면 스킵
+    const greetingPeriod = Math.floor(hour / 6);
+    if (proactiveConfig.lastGreetingHour === greetingPeriod) {
+        return null;
+    }
+    // 인사할 시간대인지 확인 (6-9, 12-14, 18-20, 23-2)
+    const shouldGreet = (hour >= 6 && hour < 9) ||
+        (hour >= 12 && hour < 14) ||
+        (hour >= 18 && hour < 20) ||
+        (hour >= 23 || hour < 2);
+    if (!shouldGreet) {
+        return null;
+    }
+    proactiveConfig.lastGreetingHour = greetingPeriod;
+    const schedules = await getTodaySchedules();
+    const message = await generateProactiveMessage({
+        type: 'greeting',
+        timeInfo: getCurrentTimeInfo(),
+        schedules
+    });
+    return {
+        message,
+        type: hour >= 23 || hour < 2 ? 'night_reminder' : 'greeting'
+    };
+}
+// 장시간 미사용 시 말 걸기 (AI 생성)
+async function getIdleMessage() {
+    const lastTime = global.lastInteractionTime || Date.now();
+    const idleMinutes = (Date.now() - lastTime) / (1000 * 60);
+    if (idleMinutes < proactiveConfig.idleThresholdMinutes) {
+        return null;
+    }
+    // 30분 내에 이미 체크했으면 스킵
+    if (Date.now() - proactiveConfig.lastIdleCheck < 30 * 60 * 1000) {
+        return null;
+    }
+    proactiveConfig.lastIdleCheck = Date.now();
+    const schedules = await getTodaySchedules();
+    const message = await generateProactiveMessage({
+        type: 'idle',
+        timeInfo: getCurrentTimeInfo(),
+        schedules,
+        idleMinutes
+    });
+    return { message, type: "idle_check" };
+}
+// 랜덤 대화 주제 (AI 생성)
+async function getRandomConversation() {
+    if (Math.random() > proactiveConfig.randomChatChance) {
+        return null;
+    }
+    const schedules = await getTodaySchedules();
+    const message = await generateProactiveMessage({
+        type: 'random',
+        timeInfo: getCurrentTimeInfo(),
+        schedules
+    });
+    return { message, type: "random_topic" };
+}
+// 능동적 AI 메시지 브로드캐스트
+function broadcastProactiveMessage(data) {
+    broadcastReminder({
+        type: 'proactive',
+        subtype: data.type,
+        message: data.message,
+        timestamp: new Date().toISOString()
+    });
+    console.log(`🤖 능동적 AI: [${data.type}] ${data.message}`);
+}
+// 능동적 AI 스케줄러 (5분마다 체크)
+setInterval(async () => {
+    if (!proactiveConfig.enabled)
+        return;
+    if (reminderClients.size === 0)
+        return; // 연결된 클라이언트 없으면 스킵
+    try {
+        // 1. 시간대 인사
+        if (proactiveConfig.greetingEnabled) {
+            const greeting = await getTimeBasedGreeting();
+            if (greeting) {
+                broadcastProactiveMessage(greeting);
+                return; // 한 번에 하나만
+            }
+        }
+        // 2. 장시간 미사용 체크
+        if (proactiveConfig.idleCheckEnabled) {
+            const idleMsg = await getIdleMessage();
+            if (idleMsg) {
+                broadcastProactiveMessage(idleMsg);
+                return;
+            }
+        }
+        // 3. 랜덤 대화 (확률적)
+        if (proactiveConfig.randomChatEnabled) {
+            const randomMsg = await getRandomConversation();
+            if (randomMsg) {
+                broadcastProactiveMessage(randomMsg);
+                return;
+            }
+        }
+    }
+    catch (error) {
+        console.error("능동적 AI 오류:", error);
+    }
+}, 5 * 60 * 1000); // 5분마다 체크
+console.log("🧠 능동적 AI가 시작되었습니다 (5분마다 체크, AI 생성 메시지)");
 //# sourceMappingURL=server.js.map

@@ -22,3 +22,24 @@ contextBridge.exposeInMainWorld("overlay", {
     moveBy?: { dx: number; dy: number } 
   }) => ipcRenderer.send("overlay:set-bounds", payload)
 });
+
+// 리마인더 알림 브릿지
+contextBridge.exposeInMainWorld("reminder", {
+  // 리마인더 이벤트 수신
+  onReminder: (callback: (data: {
+    type: string;
+    title: string;
+    date: string;
+    time: string;
+    minutesUntil: number;
+    description?: string;
+    message: string;
+  }) => void) => {
+    ipcRenderer.on("reminder", (_event, data) => callback(data));
+  },
+  
+  // 리스너 제거
+  removeListener: () => {
+    ipcRenderer.removeAllListeners("reminder");
+  }
+});
