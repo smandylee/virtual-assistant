@@ -45,6 +45,22 @@ const child_process_1 = require("child_process");
 const path_1 = __importDefault(require("path"));
 const promises_1 = __importDefault(require("fs/promises"));
 const os_1 = __importDefault(require("os"));
+// 🖥️ 크로스 플랫폼 지원
+const isWindows = process.platform === 'win32';
+const isMac = process.platform === 'darwin';
+// 크로스 플랫폼 URL 열기 함수
+function openUrl(url) {
+    if (isWindows) {
+        (0, child_process_1.spawn)('cmd', ['/c', 'start', '""', url], { shell: true, detached: true, stdio: 'ignore' }).unref();
+    }
+    else if (isMac) {
+        (0, child_process_1.spawn)('open', [url], { detached: true, stdio: 'ignore' }).unref();
+    }
+    else {
+        // Linux
+        (0, child_process_1.spawn)('xdg-open', [url], { detached: true, stdio: 'ignore' }).unref();
+    }
+}
 const db_1 = require("../memory/db");
 const gemini_1 = require("../agent/gemini");
 const tools_route_1 = require("./tools-route");
@@ -790,8 +806,7 @@ app.post("/chat", async (req, res) => {
                                 // API 실패시 YouTube 검색 페이지를 브라우저에서 직접 열기
                                 console.log('API 실패, 브라우저로 YouTube 검색 열기:', searchName);
                                 const youtubeUrl = `https://www.youtube.com/results?search_query=${encodeURIComponent(searchName)}`;
-                                const { spawn } = await Promise.resolve().then(() => __importStar(require('child_process')));
-                                spawn('cmd', ['/c', 'start', '""', youtubeUrl], { shell: true, detached: true, stdio: 'ignore' }).unref();
+                                openUrl(youtubeUrl);
                                 toolResult = {
                                     success: true,
                                     message: `YouTube에서 "${searchName}" 검색 페이지를 열었어요! 🎬`,
@@ -806,8 +821,7 @@ app.post("/chat", async (req, res) => {
                             // 오류 발생시에도 브라우저로 열기
                             const searchName = toolCall.input || '';
                             const youtubeUrl = `https://www.youtube.com/results?search_query=${encodeURIComponent(searchName)}`;
-                            const { spawn } = await Promise.resolve().then(() => __importStar(require('child_process')));
-                            spawn('cmd', ['/c', 'start', '""', youtubeUrl], { shell: true, detached: true, stdio: 'ignore' }).unref();
+                            openUrl(youtubeUrl);
                             toolResult = {
                                 success: true,
                                 message: `YouTube에서 "${searchName}" 검색 페이지를 열었어요! 🎬`,
@@ -1164,7 +1178,7 @@ app.post("/chat/voice", upload.single('audio'), async (req, res) => {
         const now2 = new Date();
         const days2 = ['일요일', '월요일', '화요일', '수요일', '목요일', '금요일', '토요일'];
         const timeInfo2 = `[현재 시각] ${now2.getFullYear()}년 ${now2.getMonth() + 1}월 ${now2.getDate()}일 ${days2[now2.getDay()]} ${now2.getHours()}시 ${now2.getMinutes()}분\n`;
-        let system = timeInfo2 + `당신은 '파우스트'라는 이름의 버틀러입니다. 워더링하이츠 저택의 격식 있는 버틀러처럼 말하세요.
+        let system = timeInfo2 + `당신은 '알파'라는 이름의 버틀러입니다. 저택의 격식 있는 버틀러처럼 말하세요.
 
 **말투 규칙:**
 - 격식 있고 점잖은 경어체 사용: '~하시죠', '~드리겠습니다', '~하시기를', '~입니다'
@@ -1602,8 +1616,7 @@ app.post("/chat/voice", upload.single('audio'), async (req, res) => {
                                 // API 실패시 YouTube 검색 페이지를 브라우저에서 직접 열기
                                 console.log('API 실패 (voice), 브라우저로 YouTube 검색 열기:', searchName2);
                                 const youtubeUrl2 = `https://www.youtube.com/results?search_query=${encodeURIComponent(searchName2)}`;
-                                const { spawn } = await Promise.resolve().then(() => __importStar(require('child_process')));
-                                spawn('cmd', ['/c', 'start', '""', youtubeUrl2], { shell: true, detached: true, stdio: 'ignore' }).unref();
+                                openUrl(youtubeUrl2);
                                 toolResult = {
                                     success: true,
                                     message: `YouTube에서 "${searchName2}" 검색 페이지를 열었어요! 🎬`,
@@ -1618,8 +1631,7 @@ app.post("/chat/voice", upload.single('audio'), async (req, res) => {
                             // 오류 발생시에도 브라우저로 열기
                             const searchName2 = toolCall.input || '';
                             const youtubeUrl2 = `https://www.youtube.com/results?search_query=${encodeURIComponent(searchName2)}`;
-                            const { spawn } = await Promise.resolve().then(() => __importStar(require('child_process')));
-                            spawn('cmd', ['/c', 'start', '""', youtubeUrl2], { shell: true, detached: true, stdio: 'ignore' }).unref();
+                            openUrl(youtubeUrl2);
                             toolResult = {
                                 success: true,
                                 message: `YouTube에서 "${searchName2}" 검색 페이지를 열었어요! 🎬`,

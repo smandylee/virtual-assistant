@@ -7,6 +7,22 @@ import { spawn } from "child_process";
 import path from "path";
 import fs from "fs/promises";
 import os from "os";
+
+// 🖥️ 크로스 플랫폼 지원
+const isWindows = process.platform === 'win32';
+const isMac = process.platform === 'darwin';
+
+// 크로스 플랫폼 URL 열기 함수
+function openUrl(url: string) {
+  if (isWindows) {
+    spawn('cmd', ['/c', 'start', '""', url], { shell: true, detached: true, stdio: 'ignore' }).unref();
+  } else if (isMac) {
+    spawn('open', [url], { detached: true, stdio: 'ignore' }).unref();
+  } else {
+    // Linux
+    spawn('xdg-open', [url], { detached: true, stdio: 'ignore' }).unref();
+  }
+}
 import { 
   initDb, 
   logInteraction, 
@@ -824,8 +840,7 @@ app.post("/chat", async (req, res) => {
                 // API 실패시 YouTube 검색 페이지를 브라우저에서 직접 열기
                 console.log('API 실패, 브라우저로 YouTube 검색 열기:', searchName);
                 const youtubeUrl = `https://www.youtube.com/results?search_query=${encodeURIComponent(searchName)}`;
-                const { spawn } = await import('child_process');
-                spawn('cmd', ['/c', 'start', '""', youtubeUrl], { shell: true, detached: true, stdio: 'ignore' }).unref();
+                openUrl(youtubeUrl);
                 
                 toolResult = {
                   success: true,
@@ -841,8 +856,7 @@ app.post("/chat", async (req, res) => {
               // 오류 발생시에도 브라우저로 열기
               const searchName = toolCall.input || '';
               const youtubeUrl = `https://www.youtube.com/results?search_query=${encodeURIComponent(searchName)}`;
-              const { spawn } = await import('child_process');
-              spawn('cmd', ['/c', 'start', '""', youtubeUrl], { shell: true, detached: true, stdio: 'ignore' }).unref();
+              openUrl(youtubeUrl);
               
               toolResult = {
                 success: true,
@@ -1693,8 +1707,7 @@ app.post("/chat/voice", upload.single('audio'), async (req, res) => {
                 // API 실패시 YouTube 검색 페이지를 브라우저에서 직접 열기
                 console.log('API 실패 (voice), 브라우저로 YouTube 검색 열기:', searchName2);
                 const youtubeUrl2 = `https://www.youtube.com/results?search_query=${encodeURIComponent(searchName2)}`;
-                const { spawn } = await import('child_process');
-                spawn('cmd', ['/c', 'start', '""', youtubeUrl2], { shell: true, detached: true, stdio: 'ignore' }).unref();
+                openUrl(youtubeUrl2);
                 
                 toolResult = {
                   success: true,
@@ -1710,8 +1723,7 @@ app.post("/chat/voice", upload.single('audio'), async (req, res) => {
               // 오류 발생시에도 브라우저로 열기
               const searchName2 = toolCall.input || '';
               const youtubeUrl2 = `https://www.youtube.com/results?search_query=${encodeURIComponent(searchName2)}`;
-              const { spawn } = await import('child_process');
-              spawn('cmd', ['/c', 'start', '""', youtubeUrl2], { shell: true, detached: true, stdio: 'ignore' }).unref();
+              openUrl(youtubeUrl2);
               
               toolResult = {
                 success: true,

@@ -86,9 +86,9 @@ export declare const tools: {
             path: string;
         }) => Promise<{
             folder: string;
-            success: boolean;
+            success: any;
             message: string;
-            error: string;
+            error: any;
         }>;
     };
     readonly open_file: {
@@ -99,9 +99,9 @@ export declare const tools: {
             path: string;
         }) => Promise<{
             file: string;
-            success: boolean;
+            success: any;
             message: string;
-            error: string;
+            error: any;
         }>;
     };
     readonly open_with: {
@@ -475,11 +475,8 @@ export declare const tools: {
         }) => Promise<{
             success: boolean;
             programName: string;
-            path: string;
+            path?: string;
             message: string;
-            error?: undefined;
-            details?: undefined;
-            note?: undefined;
         } | {
             success: boolean;
             programName: string;

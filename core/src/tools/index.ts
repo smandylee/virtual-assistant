@@ -5,8 +5,39 @@ import { exec, spawn } from "child_process";
 import { promisify } from "util";
 import { markOpened, isRecentlyOpened } from "../memory/db";
 import fetch from "node-fetch";
+import os from "os";
 
 const execAsync = promisify(exec);
+
+// 🖥️ 크로스 플랫폼 지원
+const isWindows = process.platform === 'win32';
+const isMac = process.platform === 'darwin';
+const isLinux = process.platform === 'linux';
+const homeDir = os.homedir();
+
+// 플랫폼별 기본 경로
+const getDefaultPaths = () => {
+  if (isWindows) {
+    return [
+      `${homeDir}/Desktop`,
+      `${homeDir}/Documents`,
+      `${homeDir}/Downloads`,
+      `${homeDir}/Pictures`,
+      `${homeDir}/Videos`,
+      `${homeDir}/Music`
+    ].map(p => p.replace(/\\/g, '/'));
+  } else {
+    // macOS / Linux
+    return [
+      `${homeDir}/Desktop`,
+      `${homeDir}/Documents`,
+      `${homeDir}/Downloads`,
+      `${homeDir}/Pictures`,
+      `${homeDir}/Movies`,
+      `${homeDir}/Music`
+    ];
+  }
+};
 
 const ALLOW_DIR = (process.env.ALLOW_DIR || "").replace(/\\/g,"/");
 
@@ -14,15 +45,8 @@ function inAllow(p: string) {
   const norm = path.resolve(p).replace(/\\/g,"/");
   console.log('경로 검사:', p, '-> 정규화:', norm);
   
-  // 기본 허용 경로들 (항상 포함)
-  const defaultAllowedPaths = [
-    "C:/Users/User/Desktop",
-    "C:/Users/User/Documents", 
-    "C:/Users/User/Downloads",
-    "C:/Users/User/Pictures",
-    "C:/Users/User/Videos",
-    "C:/Users/User/Music"
-  ];
+  // 기본 허용 경로들 (플랫폼별)
+  const defaultAllowedPaths = getDefaultPaths();
   
   // ALLOW_DIR이 설정되어 있으면 추가 경로들 파싱 (세미콜론 또는 쉼표로 구분)
   let additionalPaths: string[] = [];
@@ -53,6 +77,155 @@ function inAllow(p: string) {
   
   console.log('최종 결과:', result);
   return result;
+}
+
+// 🖥️ macOS 프로그램 실행 함수
+async function launchProgramMac(programName: string): Promise<{
+  success: boolean;
+  programName: string;
+  path?: string;
+  message: string;
+}> {
+  console.log(`[macOS] 프로그램 검색: "${programName}"`);
+  
+  // macOS 별명 매핑
+  const MAC_ALIASES: Record<string, string> = {
+    '카카오톡': 'KakaoTalk',
+    '카톡': 'KakaoTalk',
+    '크롬': 'Google Chrome',
+    '사파리': 'Safari',
+    '파인더': 'Finder',
+    '터미널': 'Terminal',
+    '메모': 'Notes',
+    '캘린더': 'Calendar',
+    '음악': 'Music',
+    '사진': 'Photos',
+    '메일': 'Mail',
+    '디스코드': 'Discord',
+    '디코': 'Discord',
+    '슬랙': 'Slack',
+    '줌': 'zoom.us',
+    'vs코드': 'Visual Studio Code',
+    '비주얼': 'Visual Studio Code',
+    '파이참': 'PyCharm',
+    '엑셀': 'Microsoft Excel',
+    '워드': 'Microsoft Word',
+    '파워포인트': 'Microsoft PowerPoint',
+    '피그마': 'Figma',
+    '스팀': 'Steam',
+    '계산기': 'Calculator',
+    '미리보기': 'Preview',
+    '시스템설정': 'System Preferences',
+  };
+  
+  // 별명 변환
+  const appName = MAC_ALIASES[programName] || MAC_ALIASES[programName.toLowerCase()] || programName;
+  
+  try {
+    // 1. open -a 로 앱 실행 시도
+    const proc = spawn('open', ['-a', appName], { 
+      detached: true, 
+      stdio: 'ignore' 
+    });
+    proc.unref();
+    
+    await new Promise(resolve => setTimeout(resolve, 500));
+    
+    return {
+      success: true,
+      programName: appName,
+      message: `'${appName}' 앱을 실행했습니다.`
+    };
+  } catch (error) {
+    // 2. mdfind로 앱 검색 후 실행
+    try {
+      const { stdout } = await execAsync(`mdfind "kMDItemKind == 'Application'" | grep -i "${appName}" | head -1`);
+      const appPath = stdout.trim();
+      
+      if (appPath) {
+        const proc = spawn('open', [appPath], { detached: true, stdio: 'ignore' });
+        proc.unref();
+        
+        return {
+          success: true,
+          programName: appName,
+          path: appPath,
+          message: `'${appName}' 앱을 실행했습니다.`
+        };
+      }
+    } catch {
+      // 검색 실패
+    }
+    
+    return {
+      success: false,
+      programName: appName,
+      message: `'${appName}' 앱을 찾을 수 없습니다.`
+    };
+  }
+}
+
+// 🖥️ Linux 프로그램 실행 함수
+async function launchProgramLinux(programName: string): Promise<{
+  success: boolean;
+  programName: string;
+  path?: string;
+  message: string;
+}> {
+  console.log(`[Linux] 프로그램 검색: "${programName}"`);
+  
+  // Linux 별명 매핑
+  const LINUX_ALIASES: Record<string, string> = {
+    '크롬': 'google-chrome',
+    '파이어폭스': 'firefox',
+    '파폭': 'firefox',
+    '터미널': 'gnome-terminal',
+    '파일관리자': 'nautilus',
+    '계산기': 'gnome-calculator',
+    '텍스트편집기': 'gedit',
+    'vs코드': 'code',
+    '비주얼': 'code',
+    '디스코드': 'discord',
+    '디코': 'discord',
+    '슬랙': 'slack',
+    '스팀': 'steam',
+  };
+  
+  const cmdName = LINUX_ALIASES[programName] || LINUX_ALIASES[programName.toLowerCase()] || programName.toLowerCase();
+  
+  try {
+    // which로 실행 파일 확인
+    const { stdout } = await execAsync(`which ${cmdName}`);
+    const execPath = stdout.trim();
+    
+    if (execPath) {
+      const proc = spawn(cmdName, [], { 
+        detached: true, 
+        stdio: 'ignore',
+        shell: true 
+      });
+      proc.unref();
+      
+      return {
+        success: true,
+        programName: cmdName,
+        path: execPath,
+        message: `'${cmdName}' 프로그램을 실행했습니다.`
+      };
+    }
+    
+    return {
+      success: false,
+      programName: cmdName,
+      message: `'${cmdName}' 프로그램을 찾을 수 없습니다.`
+    };
+  } catch {
+    return {
+      success: false,
+      programName: cmdName,
+      message: `'${cmdName}' 프로그램을 찾을 수 없습니다.`
+    };
+  }
 }
 
 // 허용된 명령어 목록 (최소한의 안전한 명령어들만)
@@ -372,9 +545,20 @@ export const tools = {
         };
       }
 
-      // Windows 탐색기로 폴더 열기
-      const command = `explorer "${folderPath}"`;
-      const result = await executeCommand(command, 5000);
+      // 🖥️ 크로스 플랫폼: 폴더 열기
+      let result;
+      if (isWindows) {
+        const command = `explorer "${folderPath}"`;
+        result = await executeCommand(command, 5000);
+      } else {
+        // macOS / Linux
+        result = await new Promise<{ success: boolean; output: string; error: string }>((resolve) => {
+          const proc = spawn('open', [folderPath], { detached: true, stdio: 'ignore' });
+          proc.unref();
+          resolve({ success: true, output: '', error: '' });
+        });
+      }
+      
       if (result.success) {
         markOpened(folderPath, 'folder');
       }
@@ -416,9 +600,20 @@ export const tools = {
         };
       }
 
-      // 파일 실행
-      const command = `start "" "${filePath}"`;
-      const result = await executeCommand(command, 5000);
+      // 🖥️ 크로스 플랫폼: 파일 실행
+      let result;
+      if (isWindows) {
+        const command = `start "" "${filePath}"`;
+        result = await executeCommand(command, 5000);
+      } else {
+        // macOS / Linux
+        result = await new Promise<{ success: boolean; output: string; error: string }>((resolve) => {
+          const proc = spawn('open', [filePath], { detached: true, stdio: 'ignore' });
+          proc.unref();
+          resolve({ success: true, output: '', error: '' });
+        });
+      }
+      
       if (result.success) {
         markOpened(filePath, 'file');
       }
@@ -1629,8 +1824,19 @@ export const tools = {
     }),
     async execute({ programName }: { programName: string }) {
       try {
-        console.log(`프로그램 검색 시작: "${programName}"`);
+        console.log(`프로그램 검색 시작: "${programName}" (플랫폼: ${process.platform})`);
         
+        // 🖥️ macOS 처리
+        if (isMac) {
+          return await launchProgramMac(programName);
+        }
+        
+        // 🖥️ Linux 처리  
+        if (isLinux) {
+          return await launchProgramLinux(programName);
+        }
+        
+        // Windows 처리 (기존 로직)
         // 별명 매핑 테이블
         const PROGRAM_NAME_ALIASES: Record<string, string[]> = {
           // 한국어 줄임말 -> 실제 프로그램 이름 후보들
