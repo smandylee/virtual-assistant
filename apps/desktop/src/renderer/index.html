@@ -4,67 +4,296 @@
 <meta charset="utf-8" />
 <title>Assistant</title>
 <style>
-  body{margin:0;font-family:sans-serif;background:#0b0e13;color:#e9eef6}
+  * { box-sizing: border-box; }
+  body{margin:0;font-family:'Segoe UI', -apple-system, BlinkMacSystemFont, sans-serif;background:#0b0e13;color:#e9eef6}
   #app{display:flex;flex-direction:column;height:100vh}
-  header{padding:10px 16px;background:#121723;border-bottom:1px solid #222}
-  main{flex:1;overflow:auto;padding:16px}
-  .msg{max-width:720px;margin:8px 0;line-height:1.5}
-  .me{color:#a3d3ff}.ai{color:#e9eef6}
+  header{padding:12px 16px;background:#121723;border-bottom:1px solid #222;display:flex;justify-content:space-between;align-items:center}
+  header strong{font-size:18px}
+  .header-btn{padding:6px 12px;border-radius:6px;border:0;background:#2d3748;color:#e9eef6;cursor:pointer;font-size:12px;transition:background 0.2s}
+  .header-btn:hover{background:#3d4758}
+  main{flex:1;overflow:auto;padding:16px;position:relative}
+  .msg{max-width:720px;margin:8px 0;line-height:1.6;padding:10px 14px;border-radius:12px}
+  .me{color:#a3d3ff;background:#1a2332;margin-left:auto;text-align:right}
+  .ai{color:#e9eef6;background:#1e293b}
   footer{display:flex;gap:8px;padding:12px;background:#121723;border-top:1px solid #222}
-  input{flex:1;padding:10px;border-radius:8px;border:1px solid #333;background:#0f141b;color:#e9eef6}
-  button{padding:10px 14px;border-radius:8px;border:0;background:#3b82f6;color:white}
+  input{flex:1;padding:12px;border-radius:8px;border:1px solid #333;background:#0f141b;color:#e9eef6;font-size:14px}
+  input:focus{outline:none;border-color:#3b82f6}
+  button{padding:10px 16px;border-radius:8px;border:0;background:#3b82f6;color:white;cursor:pointer;font-weight:500;transition:background 0.2s}
+  button:hover{background:#2563eb}
+  button:disabled{background:#555;cursor:not-allowed}
+  
+  /* 드래그 앤 드롭 영역 */
+  #dropzone{
+    display:none;
+    position:absolute;
+    top:50%;left:50%;transform:translate(-50%,-50%);
+    width:90%;max-width:500px;
+    padding:60px 40px;
+    border:3px dashed #3b82f6;
+    border-radius:20px;
+    background:rgba(59,130,246,0.1);
+    text-align:center;
+    z-index:100;
+    transition:all 0.3s ease;
+  }
+  #dropzone.active{display:block}
+  #dropzone.dragover{background:rgba(59,130,246,0.25);border-color:#60a5fa;transform:translate(-50%,-50%) scale(1.02)}
+  #dropzone h2{margin:0 0 10px;font-size:24px;color:#60a5fa}
+  #dropzone p{margin:0;color:#94a3b8;font-size:14px}
+  #dropzone .icon{font-size:50px;margin-bottom:15px}
+  
+  /* 파일 업로드 버튼 */
+  #upload-btn{
+    position:fixed;
+    bottom:80px;right:20px;
+    width:56px;height:56px;
+    border-radius:50%;
+    background:linear-gradient(135deg,#3b82f6,#8b5cf6);
+    color:white;
+    font-size:24px;
+    border:0;
+    cursor:pointer;
+    box-shadow:0 4px 15px rgba(59,130,246,0.4);
+    transition:all 0.3s ease;
+    z-index:50;
+  }
+  #upload-btn:hover{transform:scale(1.1);box-shadow:0 6px 20px rgba(59,130,246,0.5)}
+  
+  /* 분석 결과 */
+  .analysis-result{
+    background:#1e293b;
+    border-left:4px solid #3b82f6;
+    padding:15px;
+    margin:10px 0;
+    border-radius:0 12px 12px 0;
+    max-width:100%;
+  }
+  .analysis-result h3{margin:0 0 10px;color:#60a5fa;font-size:16px}
+  .analysis-result pre{
+    white-space:pre-wrap;
+    word-wrap:break-word;
+    font-family:inherit;
+    margin:0;
+    font-size:13px;
+    line-height:1.6;
+  }
+  
+  /* 로딩 상태 */
+  .loading{
+    display:inline-block;
+    width:20px;height:20px;
+    border:2px solid #333;
+    border-top-color:#3b82f6;
+    border-radius:50%;
+    animation:spin 1s linear infinite;
+  }
+  @keyframes spin{to{transform:rotate(360deg)}}
+  
+  /* 파일 입력 숨기기 */
+  #file-input{display:none}
 </style>
 </head>
 <body>
 <div id="app">
-  <header><strong>Assistant</strong></header>
-  <main id="log"></main>
+  <header>
+    <strong>🤖 Assistant</strong>
+    <button class="header-btn" id="toggle-drop">📄 문서 분석</button>
+  </header>
+  <main id="log">
+    <!-- 드래그 앤 드롭 영역 -->
+    <div id="dropzone">
+      <div class="icon">📂</div>
+      <h2>파일을 여기에 드롭하세요</h2>
+      <p>PDF, Word, PowerPoint, 텍스트 파일 지원</p>
+      <p style="margin-top:10px;font-size:12px;color:#64748b">또는 클릭하여 파일 선택</p>
+    </div>
+  </main>
   <footer>
-    <input id="input" placeholder="메시지를 입력하세요" />
+    <input id="input" placeholder="메시지를 입력하세요..." />
     <button id="send">전송</button>
   </footer>
 </div>
+
+<!-- 숨겨진 파일 입력 -->
+<input type="file" id="file-input" accept=".pdf,.doc,.docx,.ppt,.pptx,.txt,.md,.json,.csv" />
+
+<!-- 플로팅 업로드 버튼 -->
+<button id="upload-btn" title="문서 분석">📄</button>
+
 <script type="module">
-// API URL을 하드코딩하여 테스트
 const API = "http://localhost:3030";
 const log = document.getElementById("log");
 const input = document.getElementById("input");
 const send = document.getElementById("send");
+const dropzone = document.getElementById("dropzone");
+const toggleDrop = document.getElementById("toggle-drop");
+const uploadBtn = document.getElementById("upload-btn");
+const fileInput = document.getElementById("file-input");
 
 console.log("API URL:", API);
-console.log("window.env:", window.env);
 
-function add(role, text){
+// 메시지 추가 함수
+function add(role, text, isHtml = false) {
   const div = document.createElement("div");
-  div.className = "msg " + (role==="user"?"me":"ai");
-  div.textContent = (role==="user"?"> ":"") + text;
-  log.appendChild(div); log.scrollTop = log.scrollHeight;
+  div.className = "msg " + (role === "user" ? "me" : "ai");
+  if (isHtml) {
+    div.innerHTML = text;
+  } else {
+    div.textContent = (role === "user" ? "" : "") + text;
+  }
+  log.appendChild(div);
+  log.scrollTop = log.scrollHeight;
 }
 
-send.onclick = async ()=>{
-  const message = input.value.trim(); 
-  if(!message) return;
-  
-  console.log("Sending message:", message);
-  add("user", message); 
-  input.value="";
+// 분석 결과 표시 함수
+function addAnalysisResult(fileName, summary) {
+  const div = document.createElement("div");
+  div.className = "analysis-result";
+  div.innerHTML = `
+    <h3>📄 ${fileName} 분석 완료</h3>
+    <pre>${summary}</pre>
+  `;
+  log.appendChild(div);
+  log.scrollTop = log.scrollHeight;
+}
+
+// 로딩 메시지 추가
+function addLoading(text) {
+  const div = document.createElement("div");
+  div.className = "msg ai";
+  div.id = "loading-msg";
+  div.innerHTML = `<span class="loading"></span> ${text}`;
+  log.appendChild(div);
+  log.scrollTop = log.scrollHeight;
+}
+
+// 로딩 메시지 제거
+function removeLoading() {
+  const loadingMsg = document.getElementById("loading-msg");
+  if (loadingMsg) loadingMsg.remove();
+}
+
+// 파일 업로드 및 분석
+async function analyzeDocument(file) {
+  addLoading(`📄 "${file.name}" 분석 중...`);
   
   try {
-    const r = await fetch(API+"/chat",{
-      method:"POST",
-      headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({message})
+    const formData = new FormData();
+    formData.append('document', file);
+    
+    const response = await fetch(API + "/analyze-and-notepad", {
+      method: "POST",
+      body: formData
+    });
+    
+    const result = await response.json();
+    removeLoading();
+    
+    if (result.success) {
+      addAnalysisResult(result.fileName, result.summary);
+      add("ai", result.message);
+    } else {
+      add("ai", `❌ 분석 실패: ${result.error}`);
+    }
+  } catch (error) {
+    removeLoading();
+    console.error("분석 오류:", error);
+    add("ai", `❌ 오류: ${error.message}`);
+  }
+}
+
+// 드롭존 토글
+toggleDrop.onclick = () => {
+  dropzone.classList.toggle("active");
+};
+
+uploadBtn.onclick = () => {
+  dropzone.classList.toggle("active");
+};
+
+// 드롭존 클릭 시 파일 선택
+dropzone.onclick = () => {
+  fileInput.click();
+};
+
+// 파일 선택 시
+fileInput.onchange = (e) => {
+  const file = e.target.files[0];
+  if (file) {
+    dropzone.classList.remove("active");
+    analyzeDocument(file);
+  }
+  fileInput.value = ""; // 초기화
+};
+
+// 드래그 앤 드롭 이벤트
+document.addEventListener("dragover", (e) => {
+  e.preventDefault();
+  dropzone.classList.add("active");
+  dropzone.classList.add("dragover");
+});
+
+document.addEventListener("dragleave", (e) => {
+  if (e.target === document || e.target === document.body) {
+    dropzone.classList.remove("dragover");
+  }
+});
+
+document.addEventListener("drop", (e) => {
+  e.preventDefault();
+  dropzone.classList.remove("active");
+  dropzone.classList.remove("dragover");
+  
+  const files = e.dataTransfer.files;
+  if (files.length > 0) {
+    const file = files[0];
+    const ext = file.name.split('.').pop().toLowerCase();
+    const allowedExts = ['pdf', 'doc', 'docx', 'ppt', 'pptx', 'txt', 'md', 'json', 'csv'];
+    
+    if (allowedExts.includes(ext)) {
+      analyzeDocument(file);
+    } else {
+      add("ai", `❌ 지원하지 않는 파일 형식입니다: .${ext}\n지원 형식: PDF, Word, PowerPoint, 텍스트 파일`);
+    }
+  }
+});
+
+// 채팅 전송
+send.onclick = async () => {
+  const message = input.value.trim();
+  if (!message) return;
+  
+  console.log("Sending message:", message);
+  add("user", message);
+  input.value = "";
+  send.disabled = true;
+  
+  try {
+    const r = await fetch(API + "/chat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ message })
     });
     const j = await r.json();
     console.log("Response:", j);
-    add("assistant", j.reply || j.error || "(no reply)");
+    add("ai", j.reply || j.error || "(응답 없음)");
   } catch (error) {
     console.error("Error:", error);
-    add("assistant", "Error: " + error.message);
+    add("ai", "❌ 오류: " + error.message);
   }
+  
+  send.disabled = false;
 };
 
-input.addEventListener("keydown",(e)=>{ if(e.key==="Enter") send.click(); });
+input.addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && !e.shiftKey) {
+    e.preventDefault();
+    send.click();
+  }
+});
+
+// 초기 메시지
+add("ai", "안녕하세요! 무엇을 도와드릴까요? 📄 문서를 분석하려면 파일을 드래그 앤 드롭 하거나 오른쪽 아래 버튼을 클릭하세요!");
 </script>
 </body>
 </html>

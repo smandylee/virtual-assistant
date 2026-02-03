@@ -5,8 +5,8 @@ import {
   getRecentInteractions
 } from "../memory/db.js";
 
-// Gemini API 키 설정
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY || "AIzaSyBfP5MTl0LvryqvuGsvZd9M1Tj08dUHPDM";
+// Gemini API 키 설정 (환경변수에서 가져옴)
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY || "";
 
 const ai = new GoogleGenAI({ apiKey: GEMINI_API_KEY });
 

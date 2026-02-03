@@ -1,11 +1,30 @@
 import { z } from "zod";
 import fs from "fs/promises";
+import fsSync from "fs";
 import path from "path";
 import { exec, spawn } from "child_process";
 import { promisify } from "util";
 import { markOpened, isRecentlyOpened } from "../memory/db";
 import fetch from "node-fetch";
 import os from "os";
+
+// 문서 분석 라이브러리는 동적으로 로드
+let pdfParseModule: any = null;
+let mammothModule: any = null;
+
+async function loadPdfParse() {
+  if (!pdfParseModule) {
+    pdfParseModule = (await import("pdf-parse")).default;
+  }
+  return pdfParseModule;
+}
+
+async function loadMammoth() {
+  if (!mammothModule) {
+    mammothModule = await import("mammoth");
+  }
+  return mammothModule;
+}
 
 const execAsync = promisify(exec);
 
@@ -667,8 +686,8 @@ export const tools = {
       maxResults: z.number().optional().default(5)
     }),
     async execute({ query, maxResults = 5 }: { query: string; maxResults: number }) {
-      const GOOGLE_API_KEY = process.env.GEMINI_API_KEY || "AIzaSyBfP5MTl0LvryqvuGsvZd9M1Tj08dUHPDM";
-      const SEARCH_ENGINE_ID = "731b7541a9db4477b";
+      const GOOGLE_API_KEY = process.env.GEMINI_API_KEY || "";
+      const SEARCH_ENGINE_ID = "e52e00c246c8541ee";
       
       try {
         // Google Custom Search API 사용
@@ -729,8 +748,8 @@ export const tools = {
       maxResults: z.number().optional().default(5)
     }),
     async execute({ query, maxResults = 5 }: { query: string; maxResults: number }) {
-      const GOOGLE_API_KEY = process.env.GEMINI_API_KEY || "AIzaSyBfP5MTl0LvryqvuGsvZd9M1Tj08dUHPDM";
-      const SEARCH_ENGINE_ID = "731b7541a9db4477b";
+      const GOOGLE_API_KEY = process.env.GEMINI_API_KEY || "";
+      const SEARCH_ENGINE_ID = "e52e00c246c8541ee";
       
       try {
         // Google Custom Search API로 뉴스 검색
@@ -2259,6 +2278,229 @@ export const tools = {
         return {
           success: false,
           error: `프로그램 실행 실패: ${error.message}`
+        };
+      }
+    }
+  },
+
+  // 📄 문서 분석 도구
+  analyze_document: {
+    description: "PDF, Word, PowerPoint, 텍스트 파일을 분석하여 내용을 추출합니다",
+    schema: z.object({
+      filePath: z.string().describe("분석할 파일 경로"),
+      outputFormat: z.enum(["text", "summary", "detailed"]).optional().default("text")
+    }),
+    async execute({ filePath, outputFormat = "text" }: { filePath: string; outputFormat?: string }) {
+      try {
+        console.log('문서 분석 시작:', filePath);
+        
+        const ext = path.extname(filePath).toLowerCase();
+        let extractedText = "";
+        let metadata: any = {};
+        
+        // 파일 존재 확인
+        try {
+          await fs.access(filePath);
+        } catch {
+          return {
+            success: false,
+            error: `파일을 찾을 수 없습니다: ${filePath}`
+          };
+        }
+        
+        // 파일 타입별 텍스트 추출
+        switch (ext) {
+          case '.pdf':
+            try {
+              const pdfBuffer = await fs.readFile(filePath);
+              const pdfParse = await loadPdfParse();
+              const pdfData = await pdfParse(pdfBuffer);
+              extractedText = pdfData.text;
+              metadata = {
+                pages: pdfData.numpages,
+                info: pdfData.info
+              };
+              console.log(`PDF 분석 완료: ${pdfData.numpages}페이지`);
+            } catch (pdfError: any) {
+              return {
+                success: false,
+                error: `PDF 분석 실패: ${pdfError.message}`
+              };
+            }
+            break;
+            
+          case '.docx':
+          case '.doc':
+            try {
+              const docBuffer = await fs.readFile(filePath);
+              const mammoth = await loadMammoth();
+              const docResult = await mammoth.extractRawText({ buffer: docBuffer });
+              extractedText = docResult.value;
+              metadata = {
+                messages: docResult.messages
+              };
+              console.log('Word 문서 분석 완료');
+            } catch (docError: any) {
+              return {
+                success: false,
+                error: `Word 문서 분석 실패: ${docError.message}`
+              };
+            }
+            break;
+            
+          case '.pptx':
+          case '.ppt':
+            try {
+              // PPTX는 ZIP 파일이므로 XML 추출 (동적 import)
+              const AdmZip = (await import('adm-zip')).default;
+              const zip = new AdmZip(filePath);
+              const zipEntries = zip.getEntries();
+              
+              let slideTexts: string[] = [];
+              for (const entry of zipEntries) {
+                if (entry.entryName.startsWith('ppt/slides/slide') && entry.entryName.endsWith('.xml')) {
+                  const content = entry.getData().toString('utf8');
+                  // XML에서 텍스트 추출 (간단한 정규식)
+                  const textMatches = content.match(/<a:t>([^<]*)<\/a:t>/g);
+                  if (textMatches) {
+                    const slideText = textMatches.map((m: string) => m.replace(/<\/?a:t>/g, '')).join(' ');
+                    slideTexts.push(slideText);
+                  }
+                }
+              }
+              extractedText = slideTexts.join('\n\n--- 슬라이드 구분 ---\n\n');
+              metadata = {
+                slideCount: slideTexts.length
+              };
+              console.log(`PPT 분석 완료: ${slideTexts.length}슬라이드`);
+            } catch (pptError: any) {
+              return {
+                success: false,
+                error: `PPT 분석 실패: ${pptError.message}. adm-zip 패키지가 필요할 수 있습니다.`
+              };
+            }
+            break;
+            
+          case '.txt':
+          case '.md':
+          case '.json':
+          case '.csv':
+            try {
+              extractedText = await fs.readFile(filePath, 'utf-8');
+              metadata = {
+                lines: extractedText.split('\n').length,
+                characters: extractedText.length
+              };
+              console.log('텍스트 파일 읽기 완료');
+            } catch (txtError: any) {
+              return {
+                success: false,
+                error: `텍스트 파일 읽기 실패: ${txtError.message}`
+              };
+            }
+            break;
+            
+          default:
+            return {
+              success: false,
+              error: `지원하지 않는 파일 형식입니다: ${ext}`,
+              supportedFormats: ['.pdf', '.docx', '.doc', '.pptx', '.ppt', '.txt', '.md', '.json', '.csv']
+            };
+        }
+        
+        // 텍스트가 비어있으면 에러
+        if (!extractedText || extractedText.trim().length === 0) {
+          return {
+            success: false,
+            error: "문서에서 텍스트를 추출할 수 없습니다. 파일이 비어있거나 이미지 기반 문서일 수 있습니다."
+          };
+        }
+        
+        return {
+          success: true,
+          filePath,
+          fileType: ext,
+          extractedText: extractedText.substring(0, 50000), // 최대 50000자
+          textLength: extractedText.length,
+          metadata,
+          truncated: extractedText.length > 50000
+        };
+        
+      } catch (error: any) {
+        console.error("문서 분석 오류:", error);
+        return {
+          success: false,
+          error: `문서 분석 실패: ${error.message}`
+        };
+      }
+    }
+  },
+
+  // 📋 클립보드에 복사하고 메모장 열기
+  copy_to_notepad: {
+    description: "텍스트를 클립보드에 복사하고 메모장/텍스트 에디터를 엽니다",
+    schema: z.object({
+      text: z.string().describe("클립보드에 복사할 텍스트"),
+      openEditor: z.boolean().optional().default(true)
+    }),
+    async execute({ text, openEditor = true }: { text: string; openEditor?: boolean }) {
+      try {
+        console.log('클립보드 복사 시작, 텍스트 길이:', text.length);
+        
+        // 플랫폼별 클립보드 복사
+        if (isWindows) {
+          // Windows: PowerShell 사용
+          const escapedText = text.replace(/"/g, '`"').replace(/\$/g, '`$');
+          await execAsync(`powershell -command "Set-Clipboard -Value \\"${escapedText}\\""`);
+        } else if (isMac) {
+          // macOS: pbcopy 사용
+          const child = spawn('pbcopy');
+          child.stdin.write(text);
+          child.stdin.end();
+          await new Promise((resolve, reject) => {
+            child.on('close', resolve);
+            child.on('error', reject);
+          });
+        } else {
+          // Linux: xclip 사용
+          const child = spawn('xclip', ['-selection', 'clipboard']);
+          child.stdin.write(text);
+          child.stdin.end();
+          await new Promise((resolve, reject) => {
+            child.on('close', resolve);
+            child.on('error', reject);
+          });
+        }
+        
+        console.log('클립보드 복사 완료');
+        
+        // 에디터 열기
+        if (openEditor) {
+          if (isWindows) {
+            spawn('notepad.exe', [], { detached: true, stdio: 'ignore' }).unref();
+          } else if (isMac) {
+            spawn('open', ['-a', 'TextEdit'], { detached: true, stdio: 'ignore' }).unref();
+          } else {
+            // Linux: gedit 또는 xdg-open
+            spawn('gedit', [], { detached: true, stdio: 'ignore' }).unref();
+          }
+          console.log('텍스트 에디터 실행');
+        }
+        
+        return {
+          success: true,
+          message: openEditor 
+            ? "텍스트가 클립보드에 복사되었고, 메모장이 열렸습니다. Ctrl+V (또는 Cmd+V)로 붙여넣기 하세요!"
+            : "텍스트가 클립보드에 복사되었습니다.",
+          textLength: text.length,
+          platform: isWindows ? 'Windows' : (isMac ? 'macOS' : 'Linux')
+        };
+        
+      } catch (error: any) {
+        console.error("클립보드 복사 오류:", error);
+        return {
+          success: false,
+          error: `클립보드 복사 실패: ${error.message}`
         };
       }
     }
