@@ -8,6 +8,20 @@ import path from "path";
 import fs from "fs/promises";
 import os from "os";
 
+// 🧠 Vertex AI 통합 (장기 기억 + 벡터 검색 + 웹 검색)
+import {
+  initVertexAI,
+  chatWithVertexGemini,
+  addMemory,
+  searchMemory,
+  getMemoryStats,
+  extractAndSaveImportantInfo,
+  saveMemory,
+  cleanupOldMemories,
+  searchWithVertex,
+  searchNewsWithVertex
+} from "../vertex/index";
+
 // 🖥️ 크로스 플랫폼 지원
 const isWindows = process.platform === 'win32';
 const isMac = process.platform === 'darwin';
@@ -46,45 +60,27 @@ import {
 import { routeTools } from "./tools-route";
 import { tools } from "../tools/index";
 
-// Gemini API 클라이언트 (채팅 + STT)
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY || "AIzaSyBfP5MTl0LvryqvuGsvZd9M1Tj08dUHPDM";
-const ai = new GoogleGenAI({ apiKey: GEMINI_API_KEY });
+// Gemini API 클라이언트 (채팅 + STT) - 폴백용
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+if (!GEMINI_API_KEY) {
+  console.warn("⚠️ GEMINI_API_KEY가 설정되지 않았습니다. .env 파일을 확인하세요.");
+}
+const ai = new GoogleGenAI({ apiKey: GEMINI_API_KEY || "" });
+
+// Vertex AI 사용 여부 (true: Vertex AI, false: 기존 Gemini API)
+let useVertexAI = true;
 
 // ElevenLabs API 키 (TTS용)
-const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY || "sk_5229b050180c3757be791ca1c2954834d44cbbcf7dd533f2";
-
-// OpenCV 아바타 통신 함수들 (주석 처리 - 아바타 미사용)
-// async function sendToAvatar(endpoint: string, data: any = {}) {
-//   try {
-//     const response = await fetch(`http://localhost:5001/avatar/${endpoint}`, {
-//       method: 'POST',
-//       headers: { 'Content-Type': 'application/json' },
-//       body: JSON.stringify(data)
-//     });
-//     return await response.json();
-//   } catch (error) {
-//     console.log(`OpenCV 아바타 통신 실패: ${endpoint}`, error);
-//     return null;
-//   }
-// }
-
-// async function changeAvatarExpression(emotion: string) {
-//   return await sendToAvatar('expression', { expression: emotion });
-// }
-
-// async function startAvatarTalking() {
-//   return await sendToAvatar('talk', {});
-// }
-
-// async function stopAvatarTalking() {
-//   return await sendToAvatar('stop', {});
-// }
+const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY;
+if (!ELEVENLABS_API_KEY) {
+  console.warn("⚠️ ELEVENLABS_API_KEY가 설정되지 않았습니다. TTS 기능이 제한됩니다.");
+}
 
 const app = express();
 app.use(cors());
 app.use(express.json({ limit: "5mb" }));
 
-// 파일 업로드를 위한 multer 설정
+// 파일 업로드를 위한 multer 설정 (오디오)
 const upload = multer({ 
   storage: multer.memoryStorage(),
   limits: { fileSize: 25 * 1024 * 1024 }, // 25MB 제한 (Whisper API 제한)
@@ -102,11 +98,321 @@ const upload = multer({
   }
 });
 
+// 📄 문서 업로드를 위한 multer 설정
+const documentUpload = multer({
+  storage: multer.diskStorage({
+    destination: (req, file, cb) => {
+      const uploadDir = path.join(os.tmpdir(), 'assistant-uploads');
+      fs.mkdir(uploadDir, { recursive: true }).then(() => cb(null, uploadDir));
+    },
+    filename: (req, file, cb) => {
+      const uniqueName = `${Date.now()}-${file.originalname}`;
+      cb(null, uniqueName);
+    }
+  }),
+  limits: { fileSize: 50 * 1024 * 1024 }, // 50MB 제한
+  fileFilter: (_req, file, cb) => {
+    // 문서 파일 형식 허용
+    const allowedMimes = [
+      'application/pdf',
+      'application/msword',
+      'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      'application/vnd.ms-powerpoint',
+      'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+      'text/plain',
+      'text/markdown',
+      'application/json',
+      'text/csv'
+    ];
+    const allowedExts = ['.pdf', '.doc', '.docx', '.ppt', '.pptx', '.txt', '.md', '.json', '.csv'];
+    const ext = path.extname(file.originalname).toLowerCase();
+    
+    if (allowedMimes.includes(file.mimetype) || allowedExts.includes(ext)) {
+      cb(null, true);
+    } else {
+      cb(new Error('지원하지 않는 문서 형식입니다. PDF, Word, PowerPoint, 텍스트 파일을 사용해주세요.'));
+    }
+  }
+});
+
 // DB 초기화 (서버 시작 시 1회)
 initDb();
 
+// 🧠 Vertex AI 초기화 (장기 기억)
+initVertexAI().then(success => {
+  if (success) {
+    console.log("🧠 Vertex AI 장기 기억 시스템 활성화");
+  } else {
+    console.log("⚠️ Vertex AI 초기화 실패, 기존 Gemini API 사용");
+    useVertexAI = false;
+  }
+});
+
 // 간단 헬스체크
 app.get("/health", (_req, res) => res.json({ ok: true }));
+
+// ==================== 🧠 장기 기억 (Long-term Memory) ====================
+
+// 기억 검색
+app.post("/memory/search", async (req, res) => {
+  try {
+    const { query, topK = 5, type } = req.body;
+    
+    if (!query) {
+      return res.status(400).json({ success: false, error: "검색어가 필요합니다." });
+    }
+    
+    const results = await searchMemory(query, topK, type);
+    
+    res.json({
+      success: true,
+      query,
+      results: results.map(r => ({
+        id: r.id,
+        text: r.text,
+        type: r.type,
+        timestamp: r.timestamp,
+        metadata: r.metadata
+      })),
+      total: results.length
+    });
+  } catch (error: any) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// 기억 추가
+app.post("/memory/add", async (req, res) => {
+  try {
+    const { text, type = "fact", metadata } = req.body;
+    
+    if (!text) {
+      return res.status(400).json({ success: false, error: "텍스트가 필요합니다." });
+    }
+    
+    const id = await addMemory(text, type, metadata);
+    await saveMemory();
+    
+    res.json({
+      success: true,
+      id,
+      message: "기억이 저장되었습니다."
+    });
+  } catch (error: any) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// 기억 통계
+app.get("/memory/stats", (_req, res) => {
+  try {
+    const stats = getMemoryStats();
+    res.json({ success: true, ...stats });
+  } catch (error: any) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// 오래된 기억 정리
+app.post("/memory/cleanup", async (req, res) => {
+  try {
+    const { maxAgeDays = 30 } = req.body;
+    const removed = await cleanupOldMemories(maxAgeDays * 24 * 60 * 60 * 1000);
+    
+    res.json({
+      success: true,
+      removed,
+      message: `${removed}개의 오래된 기억이 정리되었습니다.`
+    });
+  } catch (error: any) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Vertex AI 상태 토글
+app.post("/vertex/toggle", (req, res) => {
+  useVertexAI = !useVertexAI;
+  res.json({
+    success: true,
+    useVertexAI,
+    message: useVertexAI ? "Vertex AI 활성화됨" : "기존 Gemini API 사용"
+  });
+});
+
+// Vertex AI 상태 확인
+app.get("/vertex/status", (_req, res) => {
+  res.json({
+    success: true,
+    useVertexAI,
+    memoryStats: getMemoryStats()
+  });
+});
+
+// ==================== 📄 문서 분석 (Document Analysis) ====================
+
+// 문서 업로드 및 분석
+app.post("/analyze-document", documentUpload.single('document'), async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({
+        success: false,
+        error: "문서 파일이 필요합니다. 'document' 필드로 파일을 업로드해주세요."
+      });
+    }
+
+    console.log('📄 문서 분석 요청:', req.file.originalname);
+    
+    // 1. 문서 텍스트 추출
+    const analyzeResult = await tools.analyze_document.execute({
+      filePath: req.file.path,
+      outputFormat: "text"
+    });
+
+    if (!analyzeResult.success) {
+      // 임시 파일 삭제
+      await fs.unlink(req.file.path).catch(() => {});
+      return res.status(400).json(analyzeResult);
+    }
+
+    // 2. Gemini로 상세 요약 생성
+    const summaryPrompt = `다음 문서의 내용을 상세하게 분석하고 요약해주세요.
+
+📌 요약 형식:
+1. **문서 개요**: 이 문서가 무엇에 관한 것인지 한 문장으로 설명
+2. **핵심 내용**: 가장 중요한 포인트 3-5개를 bullet point로 정리
+3. **세부 내용**: 각 섹션/챕터별 주요 내용 요약
+4. **결론/시사점**: 문서의 결론이나 시사하는 바
+5. **키워드**: 문서에서 중요한 키워드 5-10개
+
+문서 내용:
+${analyzeResult.extractedText?.substring(0, 30000)}
+
+위 형식에 맞춰 한국어로 상세하게 요약해주세요.`;
+
+    const genAI = new GoogleGenAI({ apiKey: GEMINI_API_KEY });
+    const summaryResponse = await genAI.models.generateContent({
+      model: "gemini-2.0-flash",
+      contents: summaryPrompt
+    });
+    
+    const summary = summaryResponse.text || "요약 생성에 실패했습니다.";
+
+    // 3. 결과 반환
+    const result = {
+      success: true,
+      fileName: req.file.originalname,
+      fileType: path.extname(req.file.originalname).toLowerCase(),
+      textLength: analyzeResult.textLength,
+      metadata: analyzeResult.metadata,
+      summary: summary,
+      truncated: analyzeResult.truncated
+    };
+
+    // 임시 파일 삭제
+    await fs.unlink(req.file.path).catch(() => {});
+    
+    console.log('📄 문서 분석 완료:', req.file.originalname);
+    res.json(result);
+
+  } catch (error: any) {
+    console.error('문서 분석 오류:', error);
+    // 임시 파일 삭제 시도
+    if (req.file?.path) {
+      await fs.unlink(req.file.path).catch(() => {});
+    }
+    res.status(500).json({
+      success: false,
+      error: error.message || "문서 분석 중 오류가 발생했습니다."
+    });
+  }
+});
+
+// 문서 분석 후 메모장에 붙여넣기
+app.post("/analyze-and-notepad", documentUpload.single('document'), async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({
+        success: false,
+        error: "문서 파일이 필요합니다."
+      });
+    }
+
+    console.log('📄 문서 분석 + 메모장:', req.file.originalname);
+    
+    // 1. 문서 텍스트 추출
+    const analyzeResult = await tools.analyze_document.execute({
+      filePath: req.file.path,
+      outputFormat: "text"
+    });
+
+    if (!analyzeResult.success) {
+      await fs.unlink(req.file.path).catch(() => {});
+      return res.status(400).json(analyzeResult);
+    }
+
+    // 2. Gemini로 상세 요약 생성
+    const summaryPrompt = `다음 문서의 내용을 상세하게 분석하고 요약해주세요.
+
+📌 요약 형식:
+1. **문서 개요**: 이 문서가 무엇에 관한 것인지 한 문장으로 설명
+2. **핵심 내용**: 가장 중요한 포인트 3-5개를 bullet point로 정리
+3. **세부 내용**: 각 섹션/챕터별 주요 내용 요약
+4. **결론/시사점**: 문서의 결론이나 시사하는 바
+5. **키워드**: 문서에서 중요한 키워드 5-10개
+
+문서 내용:
+${analyzeResult.extractedText?.substring(0, 30000)}
+
+위 형식에 맞춰 한국어로 상세하게 요약해주세요.`;
+
+    const genAI = new GoogleGenAI({ apiKey: GEMINI_API_KEY });
+    const summaryResponse = await genAI.models.generateContent({
+      model: "gemini-2.0-flash",
+      contents: summaryPrompt
+    });
+    
+    const summary = summaryResponse.text || "요약 생성에 실패했습니다.";
+
+    // 3. 클립보드에 복사하고 메모장 열기
+    const formattedSummary = `=== ${req.file.originalname} 요약 ===
+생성 시간: ${new Date().toLocaleString('ko-KR')}
+파일 형식: ${path.extname(req.file.originalname)}
+원본 텍스트 길이: ${analyzeResult.textLength}자
+${analyzeResult.truncated ? '(텍스트가 길어 일부만 분석됨)' : ''}
+
+${summary}
+
+=== 요약 끝 ===`;
+
+    const notepadResult = await tools.copy_to_notepad.execute({
+      text: formattedSummary,
+      openEditor: true
+    });
+
+    // 임시 파일 삭제
+    await fs.unlink(req.file.path).catch(() => {});
+
+    res.json({
+      success: true,
+      fileName: req.file.originalname,
+      summary: summary,
+      notepadOpened: notepadResult.success,
+      message: notepadResult.success 
+        ? "문서 요약이 클립보드에 복사되었고 메모장이 열렸습니다. Ctrl+V로 붙여넣기 하세요!"
+        : "문서 요약이 완료되었지만 메모장 열기에 실패했습니다."
+    });
+
+  } catch (error: any) {
+    console.error('문서 분석 + 메모장 오류:', error);
+    if (req.file?.path) {
+      await fs.unlink(req.file.path).catch(() => {});
+    }
+    res.status(500).json({
+      success: false,
+      error: error.message || "문서 분석 중 오류가 발생했습니다."
+    });
+  }
+});
 
 // ==================== 화자 인증 (Voice Authentication) ====================
 
@@ -428,10 +734,23 @@ app.post("/chat", async (req, res) => {
     } else if (isCommandRequest) {
       system += "**명령어 실행 요청입니다! 다음 JSON 형식으로 도구를 호출하세요:**\n";
       system += '{"tool": "execute_command", "input": "dir"}\n';
-    } else if (message.includes('검색') || message.includes('찾아') || message.includes('알려') || message.includes('뉴스') || message.includes('날씨') || message.includes('온도') || message.includes('몇 도') || message.includes('몇도') || message.includes('기온')) {
+    } else if (
+      message.includes('검색') || message.includes('찾아') || message.includes('알려') || 
+      message.includes('뉴스') || message.includes('날씨') || message.includes('온도') || 
+      message.includes('몇 도') || message.includes('몇도') || message.includes('기온') ||
+      // 🔥 스포츠/경기 결과 관련
+      message.includes('몇대몇') || message.includes('몇 대 몇') || message.includes('경기') ||
+      message.includes('스코어') || message.includes('점수') || message.includes('결과') ||
+      message.includes('이겼') || message.includes('졌') || message.includes('승리') || message.includes('패배') ||
+      // 🔥 축구팀 관련 질문 (경기 결과 등)
+      (message.match(/아스날|맨유|맨시티|리버풀|첼시|토트넘|바르셀로나|레알|바이에른|PSG|인터|유벤|AC밀란|손흥민|이강인|김민재/i) && 
+       (message.includes('몇') || message.includes('어떻게') || message.includes('어땠') || message.includes('대')))
+    ) {
       system += "**웹 검색 요청입니다! 다음 JSON 형식으로 도구를 호출하세요:**\n";
       system += '{"tool": "web_search", "input": "검색어"}\n';
-      system += "\n**중요**: input에는 검색하고 싶은 키워드만 넣어주세요. 날씨/온도 질문은 '지역명 날씨' 형태로 검색하세요.\n";
+      system += "\n**중요**: input에는 검색하고 싶은 키워드만 넣어주세요.\n";
+      system += "- 날씨/온도 질문: '지역명 날씨' 형태로 검색\n";
+      system += "- 스포츠 경기 결과: '팀1 vs 팀2 경기 결과' 형태로 검색\n";
     } else if (message.includes('일정') || message.includes('스케줄') || message.includes('약속') || message.includes('회의') || message.includes('미팅')) {
       // 일정 추가인지 조회인지 판단
       if (message.includes('추가') || message.includes('등록') || message.includes('저장') || 
@@ -458,7 +777,20 @@ app.post("/chat", async (req, res) => {
     system += AVAILABLE_TOOLS_PROMPT;
     system += "\n잘못된 맞춤법이나 문법 오류는 절대 허용하지 않습니다.";
     
-    let reply = await chatWithGemini(system, message);
+    // 🧠 Vertex AI 사용 여부에 따라 분기 (채팅 엔드포인트)
+    let reply: string;
+    if (useVertexAI) {
+      try {
+        reply = await chatWithVertexGemini(message, undefined, system);
+        console.log('🧠 Vertex AI 응답 사용 (채팅)');
+      } catch (vertexError) {
+        console.log('⚠️ Vertex AI 실패, 폴백:', vertexError);
+        reply = await chatWithGemini(system, message);
+      }
+    } else {
+      reply = await chatWithGemini(system, message);
+    }
+    
     let toolError: string | null = null;
     let toolSuccess = false;
     let toolResult: any = null;
@@ -632,40 +964,43 @@ app.post("/chat", async (req, res) => {
             break;
 
           case 'web_search':
-            // 🔥 강화: 검색 결과 요약
+            // 🔍 Vertex AI 검색 (Google Search Grounding)
             try {
-              const searchResult = await tools.web_search.execute({ 
-                query: toolCall.input,
-                maxResults: 5
-              });
+              const vertexSearchResult = await searchWithVertex(toolCall.input);
               
-              if (searchResult.results && searchResult.results.length > 0) {
-                const summary = await summarizeSearchResults(toolCall.input, searchResult.results);
-                toolResult = { ...searchResult, summary };
+              if (vertexSearchResult.success) {
+                toolResult = {
+                  success: true,
+                  query: toolCall.input,
+                  answer: vertexSearchResult.answer,
+                  sources: vertexSearchResult.sources,
+                  source: "Vertex AI Search"
+                };
               } else {
-                toolResult = searchResult;
+                toolResult = vertexSearchResult;
               }
-              toolSuccess = true;
+              toolSuccess = vertexSearchResult.success;
             } catch (error) {
               toolError = "웹 검색에 실패했습니다";
             }
             break;
 
           case 'news_search':
-            // 🔥 강화: 뉴스 결과 요약
+            // 🔍 Vertex AI 뉴스 검색
             try {
-              const newsResult = await tools.news_search.execute({ 
-                query: toolCall.input,
-                maxResults: 3
-              });
+              const vertexNewsResult = await searchNewsWithVertex(toolCall.input);
               
-              if (newsResult.results && newsResult.results.length > 0) {
-                const summary = await summarizeSearchResults(toolCall.input + " 뉴스", newsResult.results);
-                toolResult = { ...newsResult, summary };
+              if (vertexNewsResult.success) {
+                toolResult = {
+                  success: true,
+                  query: toolCall.input,
+                  answer: vertexNewsResult.answer,
+                  source: "Vertex AI News Search"
+                };
               } else {
-                toolResult = newsResult;
+                toolResult = vertexNewsResult;
               }
-              toolSuccess = true;
+              toolSuccess = vertexNewsResult.success;
             } catch (error) {
               toolError = "뉴스 검색에 실패했습니다";
             }
@@ -1336,10 +1671,23 @@ app.post("/chat/voice", upload.single('audio'), async (req, res) => {
     } else if (isCommandRequest) {
       system += "**명령어 실행 요청입니다! 다음 JSON 형식으로 도구를 호출하세요:**\n";
       system += '{"tool": "execute_command", "input": "dir"}\n';
-    } else if (message.includes('검색') || message.includes('찾아') || message.includes('알려') || message.includes('뉴스') || message.includes('날씨') || message.includes('온도') || message.includes('몇 도') || message.includes('몇도') || message.includes('기온')) {
+    } else if (
+      message.includes('검색') || message.includes('찾아') || message.includes('알려') || 
+      message.includes('뉴스') || message.includes('날씨') || message.includes('온도') || 
+      message.includes('몇 도') || message.includes('몇도') || message.includes('기온') ||
+      // 🔥 스포츠/경기 결과 관련
+      message.includes('몇대몇') || message.includes('몇 대 몇') || message.includes('경기') ||
+      message.includes('스코어') || message.includes('점수') || message.includes('결과') ||
+      message.includes('이겼') || message.includes('졌') || message.includes('승리') || message.includes('패배') ||
+      // 🔥 축구팀 관련 질문 (경기 결과 등)
+      (message.match(/아스날|맨유|맨시티|리버풀|첼시|토트넘|바르셀로나|레알|바이에른|PSG|인터|유벤|AC밀란|손흥민|이강인|김민재/i) && 
+       (message.includes('몇') || message.includes('어떻게') || message.includes('어땠') || message.includes('대')))
+    ) {
       system += "**웹 검색 요청입니다! 다음 JSON 형식으로 도구를 호출하세요:**\n";
       system += '{"tool": "web_search", "input": "검색어"}\n';
-      system += "\n**중요**: input에는 검색하고 싶은 키워드만 넣어주세요. 날씨/온도 질문은 '지역명 날씨' 형태로 검색하세요.\n";
+      system += "\n**중요**: input에는 검색하고 싶은 키워드만 넣어주세요.\n";
+      system += "- 날씨/온도 질문: '지역명 날씨' 형태로 검색\n";
+      system += "- 스포츠 경기 결과: '팀1 vs 팀2 경기 결과' 형태로 검색\n";
     } else if (message.includes('일정') || message.includes('스케줄') || message.includes('약속') || message.includes('회의') || message.includes('미팅')) {
       if (message.includes('추가') || message.includes('등록') || message.includes('저장') || 
           message.match(/\d{1,2}월\s*\d{1,2}일/) || message.match(/\d{4}-\d{2}-\d{2}/) || 
@@ -1505,40 +1853,43 @@ app.post("/chat/voice", upload.single('audio'), async (req, res) => {
             break;
 
           case 'web_search':
-            // 🔥 강화: 검색 결과 요약
+            // 🔍 Vertex AI 검색 (Google Search Grounding)
             try {
-              const searchResult2 = await tools.web_search.execute({ 
-                query: toolCall.input,
-                maxResults: 5
-              });
+              const vertexSearchResult2 = await searchWithVertex(toolCall.input);
               
-              if (searchResult2.results && searchResult2.results.length > 0) {
-                const summary2 = await summarizeSearchResults(toolCall.input, searchResult2.results);
-                toolResult = { ...searchResult2, summary: summary2 };
+              if (vertexSearchResult2.success) {
+                toolResult = {
+                  success: true,
+                  query: toolCall.input,
+                  answer: vertexSearchResult2.answer,
+                  sources: vertexSearchResult2.sources,
+                  source: "Vertex AI Search"
+                };
               } else {
-                toolResult = searchResult2;
+                toolResult = vertexSearchResult2;
               }
-              toolSuccess = true;
+              toolSuccess = vertexSearchResult2.success;
             } catch (error) {
               toolError = "웹 검색에 실패했습니다";
             }
             break;
 
           case 'news_search':
-            // 🔥 강화: 뉴스 결과 요약
+            // 🔍 Vertex AI 뉴스 검색
             try {
-              const newsResult2 = await tools.news_search.execute({ 
-                query: toolCall.input,
-                maxResults: 3
-              });
+              const vertexNewsResult2 = await searchNewsWithVertex(toolCall.input);
               
-              if (newsResult2.results && newsResult2.results.length > 0) {
-                const newsSummary = await summarizeSearchResults(toolCall.input + " 뉴스", newsResult2.results);
-                toolResult = { ...newsResult2, summary: newsSummary };
+              if (vertexNewsResult2.success) {
+                toolResult = {
+                  success: true,
+                  query: toolCall.input,
+                  answer: vertexNewsResult2.answer,
+                  source: "Vertex AI News Search"
+                };
               } else {
-                toolResult = newsResult2;
+                toolResult = vertexNewsResult2;
               }
-              toolSuccess = true;
+              toolSuccess = vertexNewsResult2.success;
             } catch (error) {
               toolError = "뉴스 검색에 실패했습니다";
             }
