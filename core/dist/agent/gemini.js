@@ -8,8 +8,8 @@ exports.analyzeEmotionForTTS = analyzeEmotionForTTS;
 exports.detectIntent = detectIntent;
 const genai_1 = require("@google/genai");
 const db_js_1 = require("../memory/db.js");
-// Gemini API 키 설정
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY || "AIzaSyBfP5MTl0LvryqvuGsvZd9M1Tj08dUHPDM";
+// Gemini API 키 설정 (환경변수에서 가져옴)
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY || "";
 const ai = new genai_1.GoogleGenAI({ apiKey: GEMINI_API_KEY });
 // 컨텍스트 최적화 함수
 const clip = (s, n = 300) => s.length > n ? s.slice(0, n) + '…' : s;

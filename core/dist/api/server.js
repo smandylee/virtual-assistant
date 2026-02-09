@@ -45,6 +45,8 @@ const child_process_1 = require("child_process");
 const path_1 = __importDefault(require("path"));
 const promises_1 = __importDefault(require("fs/promises"));
 const os_1 = __importDefault(require("os"));
+// 🧠 Vertex AI 통합 (장기 기억 + 벡터 검색 + 웹 검색)
+const index_1 = require("../vertex/index");
 // 🖥️ 크로스 플랫폼 지원
 const isWindows = process.platform === 'win32';
 const isMac = process.platform === 'darwin';
@@ -64,39 +66,24 @@ function openUrl(url) {
 const db_1 = require("../memory/db");
 const gemini_1 = require("../agent/gemini");
 const tools_route_1 = require("./tools-route");
-const index_1 = require("../tools/index");
-// Gemini API 클라이언트 (채팅 + STT)
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY || "AIzaSyBfP5MTl0LvryqvuGsvZd9M1Tj08dUHPDM";
-const ai = new genai_1.GoogleGenAI({ apiKey: GEMINI_API_KEY });
+const index_2 = require("../tools/index");
+// Gemini API 클라이언트 (채팅 + STT) - 폴백용
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+if (!GEMINI_API_KEY) {
+    console.warn("⚠️ GEMINI_API_KEY가 설정되지 않았습니다. .env 파일을 확인하세요.");
+}
+const ai = new genai_1.GoogleGenAI({ apiKey: GEMINI_API_KEY || "" });
+// Vertex AI 사용 여부 (true: Vertex AI, false: 기존 Gemini API)
+let useVertexAI = true;
 // ElevenLabs API 키 (TTS용)
-const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY || "sk_5229b050180c3757be791ca1c2954834d44cbbcf7dd533f2";
-// OpenCV 아바타 통신 함수들 (주석 처리 - 아바타 미사용)
-// async function sendToAvatar(endpoint: string, data: any = {}) {
-//   try {
-//     const response = await fetch(`http://localhost:5001/avatar/${endpoint}`, {
-//       method: 'POST',
-//       headers: { 'Content-Type': 'application/json' },
-//       body: JSON.stringify(data)
-//     });
-//     return await response.json();
-//   } catch (error) {
-//     console.log(`OpenCV 아바타 통신 실패: ${endpoint}`, error);
-//     return null;
-//   }
-// }
-// async function changeAvatarExpression(emotion: string) {
-//   return await sendToAvatar('expression', { expression: emotion });
-// }
-// async function startAvatarTalking() {
-//   return await sendToAvatar('talk', {});
-// }
-// async function stopAvatarTalking() {
-//   return await sendToAvatar('stop', {});
-// }
+const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY;
+if (!ELEVENLABS_API_KEY) {
+    console.warn("⚠️ ELEVENLABS_API_KEY가 설정되지 않았습니다. TTS 기능이 제한됩니다.");
+}
 const app = (0, express_1.default)();
 app.use((0, cors_1.default)());
 app.use(express_1.default.json({ limit: "5mb" }));
-// 파일 업로드를 위한 multer 설정
+// 파일 업로드를 위한 multer 설정 (오디오)
 const upload = (0, multer_1.default)({
     storage: multer_1.default.memoryStorage(),
     limits: { fileSize: 25 * 1024 * 1024 }, // 25MB 제한 (Whisper API 제한)
@@ -114,10 +101,287 @@ const upload = (0, multer_1.default)({
         }
     }
 });
+// 📄 문서 업로드를 위한 multer 설정
+const documentUpload = (0, multer_1.default)({
+    storage: multer_1.default.diskStorage({
+        destination: (req, file, cb) => {
+            const uploadDir = path_1.default.join(os_1.default.tmpdir(), 'assistant-uploads');
+            promises_1.default.mkdir(uploadDir, { recursive: true }).then(() => cb(null, uploadDir));
+        },
+        filename: (req, file, cb) => {
+            const uniqueName = `${Date.now()}-${file.originalname}`;
+            cb(null, uniqueName);
+        }
+    }),
+    limits: { fileSize: 50 * 1024 * 1024 }, // 50MB 제한
+    fileFilter: (_req, file, cb) => {
+        // 문서 파일 형식 허용
+        const allowedMimes = [
+            'application/pdf',
+            'application/msword',
+            'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+            'application/vnd.ms-powerpoint',
+            'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+            'text/plain',
+            'text/markdown',
+            'application/json',
+            'text/csv'
+        ];
+        const allowedExts = ['.pdf', '.doc', '.docx', '.ppt', '.pptx', '.txt', '.md', '.json', '.csv'];
+        const ext = path_1.default.extname(file.originalname).toLowerCase();
+        if (allowedMimes.includes(file.mimetype) || allowedExts.includes(ext)) {
+            cb(null, true);
+        }
+        else {
+            cb(new Error('지원하지 않는 문서 형식입니다. PDF, Word, PowerPoint, 텍스트 파일을 사용해주세요.'));
+        }
+    }
+});
 // DB 초기화 (서버 시작 시 1회)
 (0, db_1.initDb)();
+// 🧠 Vertex AI 초기화 (장기 기억)
+(0, index_1.initVertexAI)().then(success => {
+    if (success) {
+        console.log("🧠 Vertex AI 장기 기억 시스템 활성화");
+    }
+    else {
+        console.log("⚠️ Vertex AI 초기화 실패, 기존 Gemini API 사용");
+        useVertexAI = false;
+    }
+});
 // 간단 헬스체크
 app.get("/health", (_req, res) => res.json({ ok: true }));
+// ==================== 🧠 장기 기억 (Long-term Memory) ====================
+// 기억 검색
+app.post("/memory/search", async (req, res) => {
+    try {
+        const { query, topK = 5, type } = req.body;
+        if (!query) {
+            return res.status(400).json({ success: false, error: "검색어가 필요합니다." });
+        }
+        const results = await (0, index_1.searchMemory)(query, topK, type);
+        res.json({
+            success: true,
+            query,
+            results: results.map(r => ({
+                id: r.id,
+                text: r.text,
+                type: r.type,
+                timestamp: r.timestamp,
+                metadata: r.metadata
+            })),
+            total: results.length
+        });
+    }
+    catch (error) {
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+// 기억 추가
+app.post("/memory/add", async (req, res) => {
+    try {
+        const { text, type = "fact", metadata } = req.body;
+        if (!text) {
+            return res.status(400).json({ success: false, error: "텍스트가 필요합니다." });
+        }
+        const id = await (0, index_1.addMemory)(text, type, metadata);
+        await (0, index_1.saveMemory)();
+        res.json({
+            success: true,
+            id,
+            message: "기억이 저장되었습니다."
+        });
+    }
+    catch (error) {
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+// 기억 통계
+app.get("/memory/stats", (_req, res) => {
+    try {
+        const stats = (0, index_1.getMemoryStats)();
+        res.json({ success: true, ...stats });
+    }
+    catch (error) {
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+// 오래된 기억 정리
+app.post("/memory/cleanup", async (req, res) => {
+    try {
+        const { maxAgeDays = 30 } = req.body;
+        const removed = await (0, index_1.cleanupOldMemories)(maxAgeDays * 24 * 60 * 60 * 1000);
+        res.json({
+            success: true,
+            removed,
+            message: `${removed}개의 오래된 기억이 정리되었습니다.`
+        });
+    }
+    catch (error) {
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+// Vertex AI 상태 토글
+app.post("/vertex/toggle", (req, res) => {
+    useVertexAI = !useVertexAI;
+    res.json({
+        success: true,
+        useVertexAI,
+        message: useVertexAI ? "Vertex AI 활성화됨" : "기존 Gemini API 사용"
+    });
+});
+// Vertex AI 상태 확인
+app.get("/vertex/status", (_req, res) => {
+    res.json({
+        success: true,
+        useVertexAI,
+        memoryStats: (0, index_1.getMemoryStats)()
+    });
+});
+// ==================== 📄 문서 분석 (Document Analysis) ====================
+// 문서 업로드 및 분석
+app.post("/analyze-document", documentUpload.single('document'), async (req, res) => {
+    try {
+        if (!req.file) {
+            return res.status(400).json({
+                success: false,
+                error: "문서 파일이 필요합니다. 'document' 필드로 파일을 업로드해주세요."
+            });
+        }
+        console.log('📄 문서 분석 요청:', req.file.originalname);
+        // 1. 문서 텍스트 추출
+        const analyzeResult = await index_2.tools.analyze_document.execute({
+            filePath: req.file.path,
+            outputFormat: "text"
+        });
+        if (!analyzeResult.success) {
+            // 임시 파일 삭제
+            await promises_1.default.unlink(req.file.path).catch(() => { });
+            return res.status(400).json(analyzeResult);
+        }
+        // 2. Gemini로 상세 요약 생성
+        const summaryPrompt = `다음 문서의 내용을 상세하게 분석하고 요약해주세요.
+
+📌 요약 형식:
+1. **문서 개요**: 이 문서가 무엇에 관한 것인지 한 문장으로 설명
+2. **핵심 내용**: 가장 중요한 포인트 3-5개를 bullet point로 정리
+3. **세부 내용**: 각 섹션/챕터별 주요 내용 요약
+4. **결론/시사점**: 문서의 결론이나 시사하는 바
+5. **키워드**: 문서에서 중요한 키워드 5-10개
+
+문서 내용:
+${analyzeResult.extractedText?.substring(0, 30000)}
+
+위 형식에 맞춰 한국어로 상세하게 요약해주세요.`;
+        const genAI = new genai_1.GoogleGenAI({ apiKey: GEMINI_API_KEY });
+        const summaryResponse = await genAI.models.generateContent({
+            model: "gemini-2.0-flash",
+            contents: summaryPrompt
+        });
+        const summary = summaryResponse.text || "요약 생성에 실패했습니다.";
+        // 3. 결과 반환
+        const result = {
+            success: true,
+            fileName: req.file.originalname,
+            fileType: path_1.default.extname(req.file.originalname).toLowerCase(),
+            textLength: analyzeResult.textLength,
+            metadata: analyzeResult.metadata,
+            summary: summary,
+            truncated: analyzeResult.truncated
+        };
+        // 임시 파일 삭제
+        await promises_1.default.unlink(req.file.path).catch(() => { });
+        console.log('📄 문서 분석 완료:', req.file.originalname);
+        res.json(result);
+    }
+    catch (error) {
+        console.error('문서 분석 오류:', error);
+        // 임시 파일 삭제 시도
+        if (req.file?.path) {
+            await promises_1.default.unlink(req.file.path).catch(() => { });
+        }
+        res.status(500).json({
+            success: false,
+            error: error.message || "문서 분석 중 오류가 발생했습니다."
+        });
+    }
+});
+// 문서 분석 후 메모장에 붙여넣기
+app.post("/analyze-and-notepad", documentUpload.single('document'), async (req, res) => {
+    try {
+        if (!req.file) {
+            return res.status(400).json({
+                success: false,
+                error: "문서 파일이 필요합니다."
+            });
+        }
+        console.log('📄 문서 분석 + 메모장:', req.file.originalname);
+        // 1. 문서 텍스트 추출
+        const analyzeResult = await index_2.tools.analyze_document.execute({
+            filePath: req.file.path,
+            outputFormat: "text"
+        });
+        if (!analyzeResult.success) {
+            await promises_1.default.unlink(req.file.path).catch(() => { });
+            return res.status(400).json(analyzeResult);
+        }
+        // 2. Gemini로 상세 요약 생성
+        const summaryPrompt = `다음 문서의 내용을 상세하게 분석하고 요약해주세요.
+
+📌 요약 형식:
+1. **문서 개요**: 이 문서가 무엇에 관한 것인지 한 문장으로 설명
+2. **핵심 내용**: 가장 중요한 포인트 3-5개를 bullet point로 정리
+3. **세부 내용**: 각 섹션/챕터별 주요 내용 요약
+4. **결론/시사점**: 문서의 결론이나 시사하는 바
+5. **키워드**: 문서에서 중요한 키워드 5-10개
+
+문서 내용:
+${analyzeResult.extractedText?.substring(0, 30000)}
+
+위 형식에 맞춰 한국어로 상세하게 요약해주세요.`;
+        const genAI = new genai_1.GoogleGenAI({ apiKey: GEMINI_API_KEY });
+        const summaryResponse = await genAI.models.generateContent({
+            model: "gemini-2.0-flash",
+            contents: summaryPrompt
+        });
+        const summary = summaryResponse.text || "요약 생성에 실패했습니다.";
+        // 3. 클립보드에 복사하고 메모장 열기
+        const formattedSummary = `=== ${req.file.originalname} 요약 ===
+생성 시간: ${new Date().toLocaleString('ko-KR')}
+파일 형식: ${path_1.default.extname(req.file.originalname)}
+원본 텍스트 길이: ${analyzeResult.textLength}자
+${analyzeResult.truncated ? '(텍스트가 길어 일부만 분석됨)' : ''}
+
+${summary}
+
+=== 요약 끝 ===`;
+        const notepadResult = await index_2.tools.copy_to_notepad.execute({
+            text: formattedSummary,
+            openEditor: true
+        });
+        // 임시 파일 삭제
+        await promises_1.default.unlink(req.file.path).catch(() => { });
+        res.json({
+            success: true,
+            fileName: req.file.originalname,
+            summary: summary,
+            notepadOpened: notepadResult.success,
+            message: notepadResult.success
+                ? "문서 요약이 클립보드에 복사되었고 메모장이 열렸습니다. Ctrl+V로 붙여넣기 하세요!"
+                : "문서 요약이 완료되었지만 메모장 열기에 실패했습니다."
+        });
+    }
+    catch (error) {
+        console.error('문서 분석 + 메모장 오류:', error);
+        if (req.file?.path) {
+            await promises_1.default.unlink(req.file.path).catch(() => { });
+        }
+        res.status(500).json({
+            success: false,
+            error: error.message || "문서 분석 중 오류가 발생했습니다."
+        });
+    }
+});
 // ==================== 화자 인증 (Voice Authentication) ====================
 // 화자 인증 활성화 여부
 let voiceAuthEnabled = false;
@@ -413,10 +677,21 @@ app.post("/chat", async (req, res) => {
             system += "**명령어 실행 요청입니다! 다음 JSON 형식으로 도구를 호출하세요:**\n";
             system += '{"tool": "execute_command", "input": "dir"}\n';
         }
-        else if (message.includes('검색') || message.includes('찾아') || message.includes('알려') || message.includes('뉴스') || message.includes('날씨') || message.includes('온도') || message.includes('몇 도') || message.includes('몇도') || message.includes('기온')) {
+        else if (message.includes('검색') || message.includes('찾아') || message.includes('알려') ||
+            message.includes('뉴스') || message.includes('날씨') || message.includes('온도') ||
+            message.includes('몇 도') || message.includes('몇도') || message.includes('기온') ||
+            // 🔥 스포츠/경기 결과 관련
+            message.includes('몇대몇') || message.includes('몇 대 몇') || message.includes('경기') ||
+            message.includes('스코어') || message.includes('점수') || message.includes('결과') ||
+            message.includes('이겼') || message.includes('졌') || message.includes('승리') || message.includes('패배') ||
+            // 🔥 축구팀 관련 질문 (경기 결과 등)
+            (message.match(/아스날|맨유|맨시티|리버풀|첼시|토트넘|바르셀로나|레알|바이에른|PSG|인터|유벤|AC밀란|손흥민|이강인|김민재/i) &&
+                (message.includes('몇') || message.includes('어떻게') || message.includes('어땠') || message.includes('대')))) {
             system += "**웹 검색 요청입니다! 다음 JSON 형식으로 도구를 호출하세요:**\n";
             system += '{"tool": "web_search", "input": "검색어"}\n';
-            system += "\n**중요**: input에는 검색하고 싶은 키워드만 넣어주세요. 날씨/온도 질문은 '지역명 날씨' 형태로 검색하세요.\n";
+            system += "\n**중요**: input에는 검색하고 싶은 키워드만 넣어주세요.\n";
+            system += "- 날씨/온도 질문: '지역명 날씨' 형태로 검색\n";
+            system += "- 스포츠 경기 결과: '팀1 vs 팀2 경기 결과' 형태로 검색\n";
         }
         else if (message.includes('일정') || message.includes('스케줄') || message.includes('약속') || message.includes('회의') || message.includes('미팅')) {
             // 일정 추가인지 조회인지 판단
@@ -444,7 +719,21 @@ app.post("/chat", async (req, res) => {
         system += "```json\n{\"tool\": \"도구명\", \"input\": \"입력값\"}\n```\n";
         system += AVAILABLE_TOOLS_PROMPT;
         system += "\n잘못된 맞춤법이나 문법 오류는 절대 허용하지 않습니다.";
-        let reply = await (0, gemini_1.chatWithGemini)(system, message);
+        // 🧠 Vertex AI 사용 여부에 따라 분기 (채팅 엔드포인트)
+        let reply;
+        if (useVertexAI) {
+            try {
+                reply = await (0, index_1.chatWithVertexGemini)(message, undefined, system);
+                console.log('🧠 Vertex AI 응답 사용 (채팅)');
+            }
+            catch (vertexError) {
+                console.log('⚠️ Vertex AI 실패, 폴백:', vertexError);
+                reply = await (0, gemini_1.chatWithGemini)(system, message);
+            }
+        }
+        else {
+            reply = await (0, gemini_1.chatWithGemini)(system, message);
+        }
         let toolError = null;
         let toolSuccess = false;
         let toolResult = null;
@@ -496,7 +785,7 @@ app.post("/chat", async (req, res) => {
                             console.log('경로가 이상함, 퍼지 검색 시도:', folderPath);
                             try {
                                 // 데스크톱에서 폴더 목록 가져오기
-                                const searchResult = await index_1.tools.search_files.execute({
+                                const searchResult = await index_2.tools.search_files.execute({
                                     query: '',
                                     dir: "C:\\Users\\User\\Desktop",
                                     maxResults: 50
@@ -510,7 +799,7 @@ app.post("/chat", async (req, res) => {
                                     }
                                     else {
                                         // 퍼지 매칭 실패 시 일반 검색
-                                        const directSearch = await index_1.tools.search_files.execute({
+                                        const directSearch = await index_2.tools.search_files.execute({
                                             query: message.replace(/[^\w\s가-힣]/g, '').trim(),
                                             dir: "C:\\Users\\User\\Desktop"
                                         });
@@ -527,7 +816,7 @@ app.post("/chat", async (req, res) => {
                             }
                         }
                         console.log('폴더 열기 시도:', folderPath);
-                        toolResult = await index_1.tools.open_folder.execute({ path: folderPath });
+                        toolResult = await index_2.tools.open_folder.execute({ path: folderPath });
                         toolSuccess = true;
                         break;
                     case 'open_file':
@@ -556,7 +845,7 @@ app.post("/chat", async (req, res) => {
                                 let foundPath = null;
                                 for (const searchDir of searchDirs) {
                                     try {
-                                        const searchResult = await index_1.tools.search_files.execute({
+                                        const searchResult = await index_2.tools.search_files.execute({
                                             query: fileName,
                                             dir: searchDir,
                                             maxResults: 20,
@@ -588,15 +877,15 @@ app.post("/chat", async (req, res) => {
                             }
                         }
                         console.log('파일 실행 시도:', filePath);
-                        toolResult = await index_1.tools.open_file.execute({ path: filePath });
+                        toolResult = await index_2.tools.open_file.execute({ path: filePath });
                         toolSuccess = true;
                         break;
                     case 'execute_command':
-                        toolResult = await index_1.tools.execute_command.execute({ command: toolCall.input, timeout: 30000 });
+                        toolResult = await index_2.tools.execute_command.execute({ command: toolCall.input, timeout: 30000 });
                         toolSuccess = true;
                         break;
                     case 'search_files':
-                        toolResult = await index_1.tools.search_files.execute({
+                        toolResult = await index_2.tools.search_files.execute({
                             query: toolCall.input,
                             dir: process.env.ALLOW_DIR || "C:\\Users\\User\\Desktop",
                             maxResults: 50
@@ -604,40 +893,43 @@ app.post("/chat", async (req, res) => {
                         toolSuccess = true;
                         break;
                     case 'web_search':
-                        // 🔥 강화: 검색 결과 요약
+                        // 🔍 Vertex AI 검색 (Google Search Grounding)
                         try {
-                            const searchResult = await index_1.tools.web_search.execute({
-                                query: toolCall.input,
-                                maxResults: 5
-                            });
-                            if (searchResult.results && searchResult.results.length > 0) {
-                                const summary = await (0, gemini_1.summarizeSearchResults)(toolCall.input, searchResult.results);
-                                toolResult = { ...searchResult, summary };
+                            const vertexSearchResult = await (0, index_1.searchWithVertex)(toolCall.input);
+                            if (vertexSearchResult.success) {
+                                toolResult = {
+                                    success: true,
+                                    query: toolCall.input,
+                                    answer: vertexSearchResult.answer,
+                                    sources: vertexSearchResult.sources,
+                                    source: "Vertex AI Search"
+                                };
                             }
                             else {
-                                toolResult = searchResult;
+                                toolResult = vertexSearchResult;
                             }
-                            toolSuccess = true;
+                            toolSuccess = vertexSearchResult.success;
                         }
                         catch (error) {
                             toolError = "웹 검색에 실패했습니다";
                         }
                         break;
                     case 'news_search':
-                        // 🔥 강화: 뉴스 결과 요약
+                        // 🔍 Vertex AI 뉴스 검색
                         try {
-                            const newsResult = await index_1.tools.news_search.execute({
-                                query: toolCall.input,
-                                maxResults: 3
-                            });
-                            if (newsResult.results && newsResult.results.length > 0) {
-                                const summary = await (0, gemini_1.summarizeSearchResults)(toolCall.input + " 뉴스", newsResult.results);
-                                toolResult = { ...newsResult, summary };
+                            const vertexNewsResult = await (0, index_1.searchNewsWithVertex)(toolCall.input);
+                            if (vertexNewsResult.success) {
+                                toolResult = {
+                                    success: true,
+                                    query: toolCall.input,
+                                    answer: vertexNewsResult.answer,
+                                    source: "Vertex AI News Search"
+                                };
                             }
                             else {
-                                toolResult = newsResult;
+                                toolResult = vertexNewsResult;
                             }
-                            toolSuccess = true;
+                            toolSuccess = vertexNewsResult.success;
                         }
                         catch (error) {
                             toolError = "뉴스 검색에 실패했습니다";
@@ -657,7 +949,7 @@ app.post("/chat", async (req, res) => {
                                 scheduleData = await (0, gemini_1.parseScheduleFromText)(toolCall.input || message);
                             }
                             if (scheduleData && scheduleData.title && scheduleData.date) {
-                                toolResult = await index_1.tools.add_schedule.execute({
+                                toolResult = await index_2.tools.add_schedule.execute({
                                     title: scheduleData.title,
                                     date: scheduleData.date,
                                     time: scheduleData.time || "12:00",
@@ -677,7 +969,7 @@ app.post("/chat", async (req, res) => {
                         // JSON 파싱해서 스케줄 조회
                         try {
                             const queryData = JSON.parse(toolCall.input);
-                            toolResult = await index_1.tools.get_schedules.execute({
+                            toolResult = await index_2.tools.get_schedules.execute({
                                 date: queryData.date,
                                 upcoming: queryData.upcoming || false
                             });
@@ -691,7 +983,7 @@ app.post("/chat", async (req, res) => {
                         // JSON 파싱해서 스케줄 삭제
                         try {
                             const deleteData = JSON.parse(toolCall.input);
-                            toolResult = await index_1.tools.delete_schedule.execute({
+                            toolResult = await index_2.tools.delete_schedule.execute({
                                 id: deleteData.id
                             });
                             toolSuccess = true;
@@ -702,12 +994,12 @@ app.post("/chat", async (req, res) => {
                         break;
                     case 'check_reminders':
                         // 리마인더 체크
-                        toolResult = await index_1.tools.check_reminders.execute();
+                        toolResult = await index_2.tools.check_reminders.execute();
                         toolSuccess = true;
                         break;
                     case 'cleanup_expired_schedules':
                         // 지난 일정 자동 정리
-                        toolResult = await index_1.tools.cleanup_expired_schedules.execute();
+                        toolResult = await index_2.tools.cleanup_expired_schedules.execute();
                         toolSuccess = true;
                         break;
                     case 'launch_steam_game':
@@ -716,7 +1008,7 @@ app.post("/chat", async (req, res) => {
                             console.log('스팀 게임 실행 요청:', toolCall.input);
                             const gameData = JSON.parse(toolCall.input);
                             console.log('파싱된 게임 데이터:', gameData);
-                            toolResult = await index_1.tools.launch_steam_game.execute({
+                            toolResult = await index_2.tools.launch_steam_game.execute({
                                 gameId: gameData.gameId,
                                 gameName: gameData.gameName
                             });
@@ -737,7 +1029,7 @@ app.post("/chat", async (req, res) => {
                                 throw new Error('프로그램 이름이 비어 있습니다');
                             }
                             console.log('프로그램 이름:', programName);
-                            toolResult = await index_1.tools.launch_program.execute({
+                            toolResult = await index_2.tools.launch_program.execute({
                                 programName
                             });
                             toolSuccess = true;
@@ -751,7 +1043,7 @@ app.post("/chat", async (req, res) => {
                     case 'youtube_search':
                         try {
                             const ytSearchQuery = String(toolCall.input || '').trim();
-                            toolResult = await index_1.tools.youtube_search.execute({ query: ytSearchQuery, maxResults: 5 });
+                            toolResult = await index_2.tools.youtube_search.execute({ query: ytSearchQuery, maxResults: 5 });
                             toolSuccess = true;
                         }
                         catch (error) {
@@ -762,7 +1054,7 @@ app.post("/chat", async (req, res) => {
                         try {
                             const ytPlayData = typeof toolCall.input === 'string' ?
                                 (toolCall.input.startsWith('{') ? JSON.parse(toolCall.input) : { query: toolCall.input }) : toolCall.input;
-                            toolResult = await index_1.tools.youtube_play.execute({
+                            toolResult = await index_2.tools.youtube_play.execute({
                                 query: ytPlayData.query,
                                 videoId: ytPlayData.videoId,
                                 url: ytPlayData.url
@@ -781,7 +1073,7 @@ app.post("/chat", async (req, res) => {
                             const searchName = ytChData.channelName || ytChData.name || toolCall.input;
                             console.log('YouTube 검색 시작:', searchName);
                             // 🔥 YouTube API 시도, 실패시 브라우저로 직접 열기
-                            const searchResult = await index_1.tools.youtube_search.execute({
+                            const searchResult = await index_2.tools.youtube_search.execute({
                                 query: searchName,
                                 maxResults: 5
                             });
@@ -797,7 +1089,7 @@ app.post("/chat", async (req, res) => {
                                     const latestVideo = toolResult.videos[0];
                                     const videoId = latestVideo.videoId || latestVideo.id;
                                     console.log('영상 재생 시도:', latestVideo.title, videoId);
-                                    const playResult = await index_1.tools.youtube_play.execute({ videoId });
+                                    const playResult = await index_2.tools.youtube_play.execute({ videoId });
                                     console.log('영상 재생 결과:', playResult);
                                     toolResult.playedVideo = latestVideo;
                                 }
@@ -835,7 +1127,7 @@ app.post("/chat", async (req, res) => {
                         try {
                             const ytTrendData = typeof toolCall.input === 'string' ?
                                 (toolCall.input.startsWith('{') ? JSON.parse(toolCall.input) : {}) : toolCall.input;
-                            toolResult = await index_1.tools.youtube_trending.execute({
+                            toolResult = await index_2.tools.youtube_trending.execute({
                                 regionCode: ytTrendData.regionCode || 'KR',
                                 maxResults: ytTrendData.maxResults || 10,
                                 category: ytTrendData.category
@@ -862,7 +1154,7 @@ app.post("/chat", async (req, res) => {
                                 const programName = programNameMap[toolCall.tool] ||
                                     toolCall.tool.replace('open_', '').replace(/_/g, ' ');
                                 console.log(`프로그램 이름 변환: ${toolCall.tool} -> ${programName}`);
-                                toolResult = await index_1.tools.launch_program.execute({
+                                toolResult = await index_2.tools.launch_program.execute({
                                     programName: programName
                                 });
                                 toolSuccess = true;
@@ -1257,10 +1549,21 @@ app.post("/chat/voice", upload.single('audio'), async (req, res) => {
             system += "**명령어 실행 요청입니다! 다음 JSON 형식으로 도구를 호출하세요:**\n";
             system += '{"tool": "execute_command", "input": "dir"}\n';
         }
-        else if (message.includes('검색') || message.includes('찾아') || message.includes('알려') || message.includes('뉴스') || message.includes('날씨') || message.includes('온도') || message.includes('몇 도') || message.includes('몇도') || message.includes('기온')) {
+        else if (message.includes('검색') || message.includes('찾아') || message.includes('알려') ||
+            message.includes('뉴스') || message.includes('날씨') || message.includes('온도') ||
+            message.includes('몇 도') || message.includes('몇도') || message.includes('기온') ||
+            // 🔥 스포츠/경기 결과 관련
+            message.includes('몇대몇') || message.includes('몇 대 몇') || message.includes('경기') ||
+            message.includes('스코어') || message.includes('점수') || message.includes('결과') ||
+            message.includes('이겼') || message.includes('졌') || message.includes('승리') || message.includes('패배') ||
+            // 🔥 축구팀 관련 질문 (경기 결과 등)
+            (message.match(/아스날|맨유|맨시티|리버풀|첼시|토트넘|바르셀로나|레알|바이에른|PSG|인터|유벤|AC밀란|손흥민|이강인|김민재/i) &&
+                (message.includes('몇') || message.includes('어떻게') || message.includes('어땠') || message.includes('대')))) {
             system += "**웹 검색 요청입니다! 다음 JSON 형식으로 도구를 호출하세요:**\n";
             system += '{"tool": "web_search", "input": "검색어"}\n';
-            system += "\n**중요**: input에는 검색하고 싶은 키워드만 넣어주세요. 날씨/온도 질문은 '지역명 날씨' 형태로 검색하세요.\n";
+            system += "\n**중요**: input에는 검색하고 싶은 키워드만 넣어주세요.\n";
+            system += "- 날씨/온도 질문: '지역명 날씨' 형태로 검색\n";
+            system += "- 스포츠 경기 결과: '팀1 vs 팀2 경기 결과' 형태로 검색\n";
         }
         else if (message.includes('일정') || message.includes('스케줄') || message.includes('약속') || message.includes('회의') || message.includes('미팅')) {
             if (message.includes('추가') || message.includes('등록') || message.includes('저장') ||
@@ -1331,7 +1634,7 @@ app.post("/chat/voice", upload.single('audio'), async (req, res) => {
                         let folderPath2 = toolCall.input;
                         if (!folderPath2 || folderPath2 === '' || folderPath2.includes('WW') || folderPath2.includes('₩')) {
                             try {
-                                const searchResult3 = await index_1.tools.search_files.execute({
+                                const searchResult3 = await index_2.tools.search_files.execute({
                                     query: '',
                                     dir: "C:\\Users\\User\\Desktop",
                                     maxResults: 50
@@ -1343,7 +1646,7 @@ app.post("/chat/voice", upload.single('audio'), async (req, res) => {
                                         console.log('퍼지 검색으로 찾은 폴더:', folderPath2);
                                     }
                                     else {
-                                        const directSearch2 = await index_1.tools.search_files.execute({
+                                        const directSearch2 = await index_2.tools.search_files.execute({
                                             query: message.replace(/[^\w\s가-힣]/g, '').trim(),
                                             dir: "C:\\Users\\User\\Desktop"
                                         });
@@ -1358,7 +1661,7 @@ app.post("/chat/voice", upload.single('audio'), async (req, res) => {
                                 folderPath2 = "C:\\Users\\User\\Desktop";
                             }
                         }
-                        toolResult = await index_1.tools.open_folder.execute({ path: folderPath2 });
+                        toolResult = await index_2.tools.open_folder.execute({ path: folderPath2 });
                         toolSuccess = true;
                         break;
                     case 'open_file':
@@ -1377,7 +1680,7 @@ app.post("/chat/voice", upload.single('audio'), async (req, res) => {
                                 let foundPath = null;
                                 for (const searchDir of searchDirs) {
                                     try {
-                                        const searchResult = await index_1.tools.search_files.execute({
+                                        const searchResult = await index_2.tools.search_files.execute({
                                             query: fileName,
                                             dir: searchDir,
                                             maxResults: 20,
@@ -1404,15 +1707,15 @@ app.post("/chat/voice", upload.single('audio'), async (req, res) => {
                                 throw new Error('파일명을 특정할 수 없습니다. 파일명을 명확하게 알려주세요.');
                             }
                         }
-                        toolResult = await index_1.tools.open_file.execute({ path: filePath });
+                        toolResult = await index_2.tools.open_file.execute({ path: filePath });
                         toolSuccess = true;
                         break;
                     case 'execute_command':
-                        toolResult = await index_1.tools.execute_command.execute({ command: toolCall.input, timeout: 30000 });
+                        toolResult = await index_2.tools.execute_command.execute({ command: toolCall.input, timeout: 30000 });
                         toolSuccess = true;
                         break;
                     case 'search_files':
-                        toolResult = await index_1.tools.search_files.execute({
+                        toolResult = await index_2.tools.search_files.execute({
                             query: toolCall.input,
                             dir: process.env.ALLOW_DIR || "C:\\Users\\User\\Desktop",
                             maxResults: 50
@@ -1420,40 +1723,43 @@ app.post("/chat/voice", upload.single('audio'), async (req, res) => {
                         toolSuccess = true;
                         break;
                     case 'web_search':
-                        // 🔥 강화: 검색 결과 요약
+                        // 🔍 Vertex AI 검색 (Google Search Grounding)
                         try {
-                            const searchResult2 = await index_1.tools.web_search.execute({
-                                query: toolCall.input,
-                                maxResults: 5
-                            });
-                            if (searchResult2.results && searchResult2.results.length > 0) {
-                                const summary2 = await (0, gemini_1.summarizeSearchResults)(toolCall.input, searchResult2.results);
-                                toolResult = { ...searchResult2, summary: summary2 };
+                            const vertexSearchResult2 = await (0, index_1.searchWithVertex)(toolCall.input);
+                            if (vertexSearchResult2.success) {
+                                toolResult = {
+                                    success: true,
+                                    query: toolCall.input,
+                                    answer: vertexSearchResult2.answer,
+                                    sources: vertexSearchResult2.sources,
+                                    source: "Vertex AI Search"
+                                };
                             }
                             else {
-                                toolResult = searchResult2;
+                                toolResult = vertexSearchResult2;
                             }
-                            toolSuccess = true;
+                            toolSuccess = vertexSearchResult2.success;
                         }
                         catch (error) {
                             toolError = "웹 검색에 실패했습니다";
                         }
                         break;
                     case 'news_search':
-                        // 🔥 강화: 뉴스 결과 요약
+                        // 🔍 Vertex AI 뉴스 검색
                         try {
-                            const newsResult2 = await index_1.tools.news_search.execute({
-                                query: toolCall.input,
-                                maxResults: 3
-                            });
-                            if (newsResult2.results && newsResult2.results.length > 0) {
-                                const newsSummary = await (0, gemini_1.summarizeSearchResults)(toolCall.input + " 뉴스", newsResult2.results);
-                                toolResult = { ...newsResult2, summary: newsSummary };
+                            const vertexNewsResult2 = await (0, index_1.searchNewsWithVertex)(toolCall.input);
+                            if (vertexNewsResult2.success) {
+                                toolResult = {
+                                    success: true,
+                                    query: toolCall.input,
+                                    answer: vertexNewsResult2.answer,
+                                    source: "Vertex AI News Search"
+                                };
                             }
                             else {
-                                toolResult = newsResult2;
+                                toolResult = vertexNewsResult2;
                             }
-                            toolSuccess = true;
+                            toolSuccess = vertexNewsResult2.success;
                         }
                         catch (error) {
                             toolError = "뉴스 검색에 실패했습니다";
@@ -1471,7 +1777,7 @@ app.post("/chat/voice", upload.single('audio'), async (req, res) => {
                                 scheduleData = await (0, gemini_1.parseScheduleFromText)(toolCall.input || message);
                             }
                             if (scheduleData && scheduleData.title && scheduleData.date) {
-                                toolResult = await index_1.tools.add_schedule.execute({
+                                toolResult = await index_2.tools.add_schedule.execute({
                                     title: scheduleData.title,
                                     date: scheduleData.date,
                                     time: scheduleData.time || "12:00",
@@ -1490,7 +1796,7 @@ app.post("/chat/voice", upload.single('audio'), async (req, res) => {
                     case 'get_schedules':
                         try {
                             const queryData = JSON.parse(toolCall.input);
-                            toolResult = await index_1.tools.get_schedules.execute({
+                            toolResult = await index_2.tools.get_schedules.execute({
                                 date: queryData.date,
                                 upcoming: queryData.upcoming || false
                             });
@@ -1503,7 +1809,7 @@ app.post("/chat/voice", upload.single('audio'), async (req, res) => {
                     case 'delete_schedule':
                         try {
                             const deleteData = JSON.parse(toolCall.input);
-                            toolResult = await index_1.tools.delete_schedule.execute({
+                            toolResult = await index_2.tools.delete_schedule.execute({
                                 id: deleteData.id
                             });
                             toolSuccess = true;
@@ -1513,11 +1819,11 @@ app.post("/chat/voice", upload.single('audio'), async (req, res) => {
                         }
                         break;
                     case 'check_reminders':
-                        toolResult = await index_1.tools.check_reminders.execute();
+                        toolResult = await index_2.tools.check_reminders.execute();
                         toolSuccess = true;
                         break;
                     case 'cleanup_expired_schedules':
-                        toolResult = await index_1.tools.cleanup_expired_schedules.execute();
+                        toolResult = await index_2.tools.cleanup_expired_schedules.execute();
                         toolSuccess = true;
                         break;
                     case 'launch_steam_game':
@@ -1526,7 +1832,7 @@ app.post("/chat/voice", upload.single('audio'), async (req, res) => {
                             console.log('스팀 게임 실행 요청:', toolCall.input);
                             const gameData = JSON.parse(toolCall.input);
                             console.log('파싱된 게임 데이터:', gameData);
-                            toolResult = await index_1.tools.launch_steam_game.execute({
+                            toolResult = await index_2.tools.launch_steam_game.execute({
                                 gameId: gameData.gameId,
                                 gameName: gameData.gameName
                             });
@@ -1547,7 +1853,7 @@ app.post("/chat/voice", upload.single('audio'), async (req, res) => {
                                 throw new Error('프로그램 이름이 비어 있습니다');
                             }
                             console.log('프로그램 이름:', programName);
-                            toolResult = await index_1.tools.launch_program.execute({
+                            toolResult = await index_2.tools.launch_program.execute({
                                 programName
                             });
                             toolSuccess = true;
@@ -1561,7 +1867,7 @@ app.post("/chat/voice", upload.single('audio'), async (req, res) => {
                     case 'youtube_search':
                         try {
                             const ytSearchQ = String(toolCall.input || '').trim();
-                            toolResult = await index_1.tools.youtube_search.execute({ query: ytSearchQ, maxResults: 5 });
+                            toolResult = await index_2.tools.youtube_search.execute({ query: ytSearchQ, maxResults: 5 });
                             toolSuccess = true;
                         }
                         catch (error) {
@@ -1572,7 +1878,7 @@ app.post("/chat/voice", upload.single('audio'), async (req, res) => {
                         try {
                             const ytPlayInfo = typeof toolCall.input === 'string' ?
                                 (toolCall.input.startsWith('{') ? JSON.parse(toolCall.input) : { query: toolCall.input }) : toolCall.input;
-                            toolResult = await index_1.tools.youtube_play.execute({
+                            toolResult = await index_2.tools.youtube_play.execute({
                                 query: ytPlayInfo.query,
                                 videoId: ytPlayInfo.videoId,
                                 url: ytPlayInfo.url
@@ -1591,7 +1897,7 @@ app.post("/chat/voice", upload.single('audio'), async (req, res) => {
                             const searchName2 = ytChInfo.channelName || ytChInfo.name || toolCall.input;
                             console.log('YouTube 검색 시작 (voice):', searchName2);
                             // 🔥 YouTube API 시도, 실패시 브라우저로 직접 열기
-                            const searchRes = await index_1.tools.youtube_search.execute({
+                            const searchRes = await index_2.tools.youtube_search.execute({
                                 query: searchName2,
                                 maxResults: 5
                             });
@@ -1607,7 +1913,7 @@ app.post("/chat/voice", upload.single('audio'), async (req, res) => {
                                     const latestVid = toolResult.videos[0];
                                     const vidId = latestVid.videoId || latestVid.id;
                                     console.log('영상 재생 시도 (voice):', latestVid.title, vidId);
-                                    const playRes = await index_1.tools.youtube_play.execute({ videoId: vidId });
+                                    const playRes = await index_2.tools.youtube_play.execute({ videoId: vidId });
                                     console.log('영상 재생 결과 (voice):', playRes);
                                     toolResult.playedVideo = latestVid;
                                 }
@@ -1645,7 +1951,7 @@ app.post("/chat/voice", upload.single('audio'), async (req, res) => {
                         try {
                             const ytTrendInfo = typeof toolCall.input === 'string' ?
                                 (toolCall.input.startsWith('{') ? JSON.parse(toolCall.input) : {}) : toolCall.input;
-                            toolResult = await index_1.tools.youtube_trending.execute({
+                            toolResult = await index_2.tools.youtube_trending.execute({
                                 regionCode: ytTrendInfo.regionCode || 'KR',
                                 maxResults: ytTrendInfo.maxResults || 10,
                                 category: ytTrendInfo.category
@@ -1672,7 +1978,7 @@ app.post("/chat/voice", upload.single('audio'), async (req, res) => {
                                 const programName = programNameMap[toolCall.tool] ||
                                     toolCall.tool.replace('open_', '').replace(/_/g, ' ');
                                 console.log(`프로그램 이름 변환: ${toolCall.tool} -> ${programName}`);
-                                toolResult = await index_1.tools.launch_program.execute({
+                                toolResult = await index_2.tools.launch_program.execute({
                                     programName: programName
                                 });
                                 toolSuccess = true;
@@ -2050,7 +2356,7 @@ app.get("/youtube/search", async (req, res) => {
         if (!query) {
             return res.status(400).json({ error: "검색어(q)가 필요합니다" });
         }
-        const result = await index_1.tools.youtube_search.execute({ query, maxResults });
+        const result = await index_2.tools.youtube_search.execute({ query, maxResults });
         res.json(result);
     }
     catch (error) {
@@ -2064,7 +2370,7 @@ app.post("/youtube/play", async (req, res) => {
         if (!query && !videoId && !url) {
             return res.status(400).json({ error: "query, videoId, 또는 url 중 하나가 필요합니다" });
         }
-        const result = await index_1.tools.youtube_play.execute({ query, videoId, url });
+        const result = await index_2.tools.youtube_play.execute({ query, videoId, url });
         res.json(result);
     }
     catch (error) {
@@ -2077,7 +2383,7 @@ app.get("/youtube/trending", async (req, res) => {
         const regionCode = req.query.region || 'KR';
         const maxResults = parseInt(req.query.maxResults) || 10;
         const category = req.query.category;
-        const result = await index_1.tools.youtube_trending.execute({ regionCode, maxResults, category });
+        const result = await index_2.tools.youtube_trending.execute({ regionCode, maxResults, category });
         res.json(result);
     }
     catch (error) {
@@ -2093,7 +2399,7 @@ app.get("/youtube/channel", async (req, res) => {
         if (!channelName && !channelId) {
             return res.status(400).json({ error: "채널 이름(name) 또는 채널 ID(id)가 필요합니다" });
         }
-        const result = await index_1.tools.youtube_channel_videos.execute({ channelName, channelId, maxResults });
+        const result = await index_2.tools.youtube_channel_videos.execute({ channelName, channelId, maxResults });
         res.json(result);
     }
     catch (error) {
@@ -2107,7 +2413,7 @@ app.get("/youtube/video/:videoId", async (req, res) => {
         if (!videoId) {
             return res.status(400).json({ error: "videoId가 필요합니다" });
         }
-        const result = await index_1.tools.youtube_video_info.execute({ videoId });
+        const result = await index_2.tools.youtube_video_info.execute({ videoId });
         res.json(result);
     }
     catch (error) {
@@ -2130,7 +2436,7 @@ app.post("/youtube/voice-play", upload.single('audio'), async (req, res) => {
         const cleanQuery = query
             .replace(/(틀어|재생해|들려줘|켜줘|보여줘|찾아줘|검색해|유튜브|youtube)/gi, '')
             .trim();
-        const result = await index_1.tools.youtube_play.execute({ query: cleanQuery });
+        const result = await index_2.tools.youtube_play.execute({ query: cleanQuery });
         res.json({
             ...result,
             recognizedText: query,
@@ -2191,7 +2497,7 @@ app.get("/time", (_req, res) => {
 // 수동 리마인더 체크 엔드포인트
 app.get("/reminders/check", async (_req, res) => {
     try {
-        const result = await index_1.tools.check_reminders.execute();
+        const result = await index_2.tools.check_reminders.execute();
         res.json(result);
     }
     catch (error) {
@@ -2206,7 +2512,7 @@ const notifiedReminders = new Set();
 // 1분마다 리마인더 체크 (더 정밀하게)
 setInterval(async () => {
     try {
-        const result = await index_1.tools.check_reminders.execute();
+        const result = await index_2.tools.check_reminders.execute();
         if (result.reminders && result.reminders.length > 0) {
             console.log(`🔔 리마인더 체크: ${result.reminders.length}개의 일정이 곧 시작됩니다`);
             for (const reminder of result.reminders) {
@@ -2308,7 +2614,7 @@ ${context.idleMinutes ? `주인이 ${Math.floor(context.idleMinutes)}분째 대�
 // 오늘의 일정 가져오기
 async function getTodaySchedules() {
     try {
-        const result = await index_1.tools.get_schedules.execute({
+        const result = await index_2.tools.get_schedules.execute({
             date: new Date().toISOString().split('T')[0],
             upcoming: true
         });
