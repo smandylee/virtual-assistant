@@ -4,6 +4,7 @@ import cors from "cors";
 import multer from "multer";
 import { GoogleGenAI } from "@google/genai";
 import { spawn } from "child_process";
+import { Readable } from "stream";
 import path from "path";
 import fs from "fs/promises";
 import os from "os";
@@ -19,8 +20,18 @@ import {
   saveMemory,
   cleanupOldMemories,
   searchWithVertex,
-  searchNewsWithVertex
+  searchNewsWithVertex,
+  migrateMemoryToFirestore,
 } from "../vertex/index";
+
+// 🔥 Firestore 중앙 DB
+import {
+  isConnected as isFirestoreConnected,
+  saveConversation as firestoreSaveConversation,
+} from "../memory/firestore.js";
+
+// 🧭 메모리 라우터
+import { classifyQuery, unifiedSearch, formatForContext } from "../memory/router.js";
 
 // 🖥️ 크로스 플랫폼 지원
 const isWindows = process.platform === 'win32';
@@ -204,10 +215,49 @@ app.post("/memory/add", async (req, res) => {
 });
 
 // 기억 통계
-app.get("/memory/stats", (_req, res) => {
+app.get("/memory/stats", async (_req, res) => {
   try {
-    const stats = getMemoryStats();
+    const stats = await getMemoryStats();
     res.json({ success: true, ...stats });
+  } catch (error: any) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// JSON → Firestore 마이그레이션 엔드포인트
+app.post("/memory/migrate", async (_req, res) => {
+  try {
+    const count = await migrateMemoryToFirestore();
+    res.json({
+      success: true,
+      migrated: count,
+      message: `${count}개 기억이 Firestore로 마이그레이션되었습니다.`,
+    });
+  } catch (error: any) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// 메모리 라우팅 테스트 엔드포인트
+app.post("/memory/route", async (req, res) => {
+  try {
+    const { query } = req.body;
+    if (!query) {
+      return res.status(400).json({ success: false, error: "query가 필요합니다." });
+    }
+
+    const decision = classifyQuery(query);
+    const searchResult = await unifiedSearch(query);
+    const contextStr = formatForContext(searchResult);
+
+    res.json({
+      success: true,
+      query,
+      route: decision,
+      memories: searchResult.memories.length,
+      hasSearchAnswer: !!searchResult.searchAnswer,
+      context: contextStr,
+    });
   } catch (error: any) {
     res.status(500).json({ success: false, error: error.message });
   }
@@ -1403,84 +1453,7 @@ async function speechToText(audioBuffer: Buffer, filename: string): Promise<stri
   }
 }
 
-// ElevenLabs TTS API를 사용한 텍스트-음성 변환 함수
-// 🔥 강화: 감정 인식 적용
-async function textToSpeech(
-  text: string, 
-  voiceId: string = 'rUSWM861uoIpt6gT6Vpt',  // 사용자 커스텀 음성
-  model: string = 'eleven_multilingual_v2',   // 다국어 모델 (한국어 지원)
-  stability: number = 0.5,
-  similarityBoost: number = 0.75
-): Promise<Buffer> {
-  try {
-    // 🔥 강화: 감정 분석으로 음성 스타일 조절
-    const emotionResult = await analyzeEmotionForTTS(text);
-    console.log('감정 분석 결과:', emotionResult);
-    
-    // 감정에 따른 음성 설정 조절
-    let adjustedStability = stability;
-    let adjustedSimilarity = similarityBoost;
-    
-    switch (emotionResult.emotion) {
-      case 'happy':
-      case 'excited':
-        adjustedStability = 0.3;  // 더 활기찬 느낌
-        adjustedSimilarity = 0.8;
-        break;
-      case 'sad':
-        adjustedStability = 0.7;  // 차분한 느낌
-        adjustedSimilarity = 0.6;
-        break;
-      case 'surprised':
-        adjustedStability = 0.25;  // 놀란 느낌
-        adjustedSimilarity = 0.85;
-        break;
-      default:
-        break;
-    }
-    
-    console.log('ElevenLabs TTS API 호출:', { model, voiceId, textLength: text.length, emotion: emotionResult.emotion });
-    
-    // ElevenLabs API 엔드포인트
-    const url = `https://api.elevenlabs.io/v1/text-to-speech/${voiceId}`;
-    
-    const requestBody = {
-      text: text,
-      model_id: model,
-      voice_settings: {
-        stability: adjustedStability,
-        similarity_boost: adjustedSimilarity,
-        style: 0.5,
-        use_speaker_boost: true
-      }
-    };
-
-    const response = await fetch(url, {
-      method: 'POST',
-      headers: {
-        'Accept': 'audio/mpeg',
-        'Content-Type': 'application/json',
-        'xi-api-key': ELEVENLABS_API_KEY
-      },
-      body: JSON.stringify(requestBody)
-    });
-
-    if (!response.ok) {
-      const errorText = await response.text();
-      throw new Error(`ElevenLabs API 오류: ${response.status} - ${errorText}`);
-    }
-
-    // 오디오 데이터를 Buffer로 변환
-    const arrayBuffer = await response.arrayBuffer();
-    const buffer = Buffer.from(arrayBuffer);
-    console.log('ElevenLabs TTS Buffer 생성 완료, 크기:', buffer.length, 'bytes');
-    return buffer;
-    
-  } catch (error: any) {
-    console.error('ElevenLabs TTS 오류:', error);
-    throw new Error(`TTS 실패: ${error.message}`);
-  }
-}
+// ElevenLabs TTS 스트리밍 (감정 분석 제거 → 저지연)
 
 // 음성 파일을 텍스트로 변환하는 엔드포인트
 app.post("/speech-to-text", upload.single('audio'), async (req, res) => {
@@ -1497,7 +1470,7 @@ app.post("/speech-to-text", upload.single('audio'), async (req, res) => {
   }
 });
 
-// 텍스트를 음성으로 변환하는 엔드포인트 (ElevenLabs TTS)
+// 텍스트를 음성으로 변환하는 엔드포인트 (ElevenLabs TTS 스트리밍)
 app.post("/text-to-speech", async (req, res) => {
   try {
     const { 
@@ -1525,12 +1498,48 @@ app.post("/text-to-speech", async (req, res) => {
     // 음성 이름 또는 ID 처리
     const voiceId = voiceMap[voice.toLowerCase()] || voice;
     
-    const audioBuffer = await textToSpeech(text, voiceId, model, stability, similarityBoost);
-    
-    // MP3 오디오 파일로 응답
+    console.log('ElevenLabs TTS 스트리밍 요청:', { model, voiceId, textLength: text.length });
+
+    // ElevenLabs 스트리밍 엔드포인트 사용 (일반 엔드포인트보다 TTFB가 빠름)
+    const url = `https://api.elevenlabs.io/v1/text-to-speech/${voiceId}/stream`;
+
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Accept': 'audio/mpeg',
+        'Content-Type': 'application/json',
+        'xi-api-key': ELEVENLABS_API_KEY
+      },
+      body: JSON.stringify({
+        text,
+        model_id: model,
+        voice_settings: {
+          stability,
+          similarity_boost: similarityBoost,
+          style: 0.5,
+          use_speaker_boost: true
+        }
+      })
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(`ElevenLabs API 오류: ${response.status} - ${errorText}`);
+    }
+
+    // 스트리밍 응답: ElevenLabs → 서버 → 클라이언트로 직접 파이프
     res.setHeader('Content-Type', 'audio/mpeg');
-    res.setHeader('Content-Disposition', `attachment; filename="tts-${Date.now()}.mp3"`);
-    res.send(audioBuffer);
+    res.setHeader('Transfer-Encoding', 'chunked');
+
+    const nodeStream = Readable.fromWeb(response.body as any);
+    nodeStream.pipe(res);
+
+    nodeStream.on('error', (err) => {
+      console.error('TTS 스트리밍 오류:', err);
+      if (!res.headersSent) {
+        res.status(500).json({ error: 'TTS 스트리밍 실패' });
+      }
+    });
   } catch (error: any) {
     console.error('TTS 처리 오류:', error);
     res.status(500).json({ error: error.message });
