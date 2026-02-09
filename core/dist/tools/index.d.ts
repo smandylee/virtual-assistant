@@ -506,4 +506,72 @@ export declare const tools: {
             note?: undefined;
         }>;
     };
+    readonly analyze_document: {
+        readonly description: "PDF, Word, PowerPoint, 텍스트 파일을 분석하여 내용을 추출합니다";
+        readonly schema: z.ZodObject<{
+            filePath: z.ZodString;
+            outputFormat: z.ZodDefault<z.ZodOptional<z.ZodEnum<{
+                text: "text";
+                summary: "summary";
+                detailed: "detailed";
+            }>>>;
+        }, z.core.$strip>;
+        readonly execute: ({ filePath, outputFormat }: {
+            filePath: string;
+            outputFormat?: string;
+        }) => Promise<{
+            success: boolean;
+            error: string;
+            supportedFormats?: undefined;
+            filePath?: undefined;
+            fileType?: undefined;
+            extractedText?: undefined;
+            textLength?: undefined;
+            metadata?: undefined;
+            truncated?: undefined;
+        } | {
+            success: boolean;
+            error: string;
+            supportedFormats: string[];
+            filePath?: undefined;
+            fileType?: undefined;
+            extractedText?: undefined;
+            textLength?: undefined;
+            metadata?: undefined;
+            truncated?: undefined;
+        } | {
+            success: boolean;
+            filePath: string;
+            fileType: ".txt" | ".md" | ".pdf" | ".docx" | ".doc" | ".pptx" | ".ppt" | ".json" | ".csv";
+            extractedText: string;
+            textLength: number;
+            metadata: any;
+            truncated: boolean;
+            error?: undefined;
+            supportedFormats?: undefined;
+        }>;
+    };
+    readonly copy_to_notepad: {
+        readonly description: "텍스트를 클립보드에 복사하고 메모장/텍스트 에디터를 엽니다";
+        readonly schema: z.ZodObject<{
+            text: z.ZodString;
+            openEditor: z.ZodDefault<z.ZodOptional<z.ZodBoolean>>;
+        }, z.core.$strip>;
+        readonly execute: ({ text, openEditor }: {
+            text: string;
+            openEditor?: boolean;
+        }) => Promise<{
+            success: boolean;
+            message: string;
+            textLength: number;
+            platform: string;
+            error?: undefined;
+        } | {
+            success: boolean;
+            error: string;
+            message?: undefined;
+            textLength?: undefined;
+            platform?: undefined;
+        }>;
+    };
 };
